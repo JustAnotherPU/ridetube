@@ -27,7 +27,13 @@ function family(name) {
 /** Smallest baked size >= requested (downscaling looks better), else largest. */
 function get(name, size, text) {
     // Shared supplemental atlases avoid duplicating glyphs in every numeric size.
-    if (text && /[\u3000-\u9fff\uff00-\uffef]/.test(text)) name = 'cjk';
+    if (text && /[\u3000-\u9fff\uff00-\uffef]/.test(text)) {
+        name = 'cjk';
+        const primary = family(name), titles = family('cjk-titles');
+        if (titles && (!primary || Array.from(text).some((ch) => !primary[0].glyphs[ch.codePointAt(0)]))) {
+            name = 'cjk-titles';
+        }
+    }
     else if (text && /[\u0400-\u04ff]/.test(text)) name = 'cyrillic';
     const fam = family(name) || family('label');
     if (!fam) return null;
