@@ -150,6 +150,7 @@ mgu.run({
             .catch((e) => { log.error('speller', e); ui.text('MAIN_INFO', 'The keyboard did not open: ' + (e.message || e)); }));
         SLOTS.forEach((b, i) => ui.onClick(b, () => search(slots()[i])));
         ui.onClick('BTN_NOW', () => { show('player'); ui.open('VIEW'); });
+        ui.onClick('BTN_CLOSE', () => { closeVideo(); info(); });
         ui.onClick('BTN_RESULTS', () => { show('results'); ui.open('VIEW'); });
         [['BTN_HOME', 'home'], ['BTN_SUBS', 'subs'], ['BTN_WL', 'wl']].forEach(([b, m]) => ui.onClick(b, () => { show(m); ui.open('VIEW'); }));
         // Sign in: the Home tab shows how (after a failed try, asks again). Sign out: pressed twice within 5 s
@@ -197,6 +198,16 @@ mgu.run({
             if (model.id === id && model.active()) return;
             model.play(id, rect(), settings.get('fill') !== false, it, { quality: settings.get('quality'), skip: sbSkip() });
         }
+        // Close: the video ends here and now (the daemon stops the sound, gives the speakers back and ends the decoder),
+        // nothing plays next, and the list it came from shows again
+        function closeVideo() {
+            if (!model.active() && model.state !== 'ended' && model.state !== 'error') return;
+            queue = []; nextAt = 0;
+            model.stop();
+            goBack(browse);
+        }
+        // an X: the Close control's glyph
+        const xGlyph = (cv, x, y, r, c) => { cv.line(x - r, y - r, x + r, y + r, 6, c); cv.line(x - r, y + r, x + r, y - r, 6, c); };
         // from render: ended with a next one -> 5 s to see what comes, then it plays (back to the list cancels)
         function autoNext() {
             if (model.state !== 'ended' || !queue.length || mode !== 'player') { nextAt = 0; return null; }
@@ -711,7 +722,7 @@ mgu.run({
          * the page's px (dx, dy). Hidden, the same keys cover the whole screen and only show it again (the
          * controller stays on its key, so a turn or a press wakes it; a tap anywhere too).
          */
-        const OVK = ['ov:back', 'ov:qr', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'];
+        const OVK = ['ov:back', 'ov:qr', 'ov:close', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'];
         // podcast mode (driving): artwork, title, chapter, the bar with chapter ticks and skipped segments, controls
         // a glove can hit (-10 s, play/pause, +10 s, next in the row), the next video, a skipped-sponsor notice
         function drawPodcast(cv, SW, SH, LX, tg, run, live) {
@@ -768,6 +779,11 @@ mgu.run({
                     else { cv.roundRect(mid - 124, cy - 32, 16, 64, 4, c); cv.roundRect(mid - 92, cy - 32, 16, 64, 4, c); }
                 });
                 big('ov:ff', mid + 100, 58, false, () => model.skip(10000), num('+10', mid + 100));
+            }
+            if (model.active()) {
+                // Close, after the other controls (Next takes mid + 300 when something plays next)
+                const kx = mid + (queue.length ? 500 : 300);
+                big('ov:close', kx, 58, false, closeVideo, (c) => xGlyph(cv, kx, cy, 20, c));
             }
             else if (model.state === 'error' && model.id) big('ov:play', mid - 100, 72, true, again, (c) => retryGlyph(cv, mid - 100, cy, 30, c));
             if (queue.length) {
@@ -839,6 +855,12 @@ mgu.run({
                 tg(qx0, qy0, cw, chh, () => { qrUntil = 0; wake(); }, 'ov:qrcard', 24);
                 cv.xf();
                 return;
+            }
+            // middle left, Close: the video ends and the list shows again (mirrors Quality / Zoom on the right)
+            if (act) {
+                const kx = LX + 150;
+                ctl('ov:close', kx, cy, 42, closeVideo, (c) => xGlyph(cv, kx, cy, 15, c));
+                cv.text('Close', kx, cy + 76, 22, '#dddddd', { literal: true, align: 'center' });
             }
             // middle: -10 s, play / pause, +10 s; preparing: the ring with the percentage
             let mid = null;

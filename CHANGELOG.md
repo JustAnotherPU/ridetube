@@ -1,5 +1,11 @@
 # Changelog
 
+## App 0.3.9
+
+- Close: the player's overlay (middle left), the podcast view while driving (after the controls) and the HMI menu
+  (Close video) end the video at once: the service stops the sound, gives the speakers back and ends the decoder,
+  nothing plays next, and the list it came from shows again. The service is unchanged (its `stop` command).
+
 ## Service 0.3.9
 
 - Videos play again: each video's folder was 0700, so BMW's media engine (its own uid) could not open the audio
