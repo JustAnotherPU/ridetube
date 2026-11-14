@@ -335,7 +335,7 @@ async function appFrames() {
         assert.deepStrictEqual(bar(), [], 'no bar where the kit runs the screen');
         assert.ok(pl.extra > 0, 'so the page reaches the screen bottom: extra ' + pl.extra);
         assert.deepStrictEqual(frame().vrect, [0, 0, pl.w, pl.h], 'the player: the video over the whole screen at once');
-        assert.deepStrictEqual(keys(), ['ov:back', 'ov:qr', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'], 'the overlay controls');
+        assert.deepStrictEqual(keys(), ['ov:back', 'ov:qr', 'ov:close', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'], 'the overlay controls');
         // Quality: auto -> 720 (the setting too); zoom: whole picture (default, 0.3.6) -> fill
         disp.pageTargets.find((t) => t.key === 'ov:q').run();
         await lastIs(d, { cmd: 'quality', quality: '720' }, 'Quality: the next one');
@@ -381,7 +381,7 @@ async function appFrames() {
         disp.onTap(800, 300);
         await hu.loopFn();
         const hid = disp.pageTargets;
-        assert.ok(hid.length === 8 && hid.every((t) => t.w > 1000 && t.h > 500), 'a tap beside them: hidden, each key the whole screen');
+        assert.ok(hid.length === 9 && hid.every((t) => t.w > 1000 && t.h > 500), 'a tap beside them: hidden, each key the whole screen');
         assert.deepStrictEqual(frame().vrect, [0, 0, pl.w, pl.h], 'the video stays whole');
         const pauses = d.cmds('pause').length;
         hid.find((t) => t.key === 'ov:play').run();       // (as the controller pressed on its key, or a tap)
@@ -414,7 +414,7 @@ async function appFrames() {
         await sleep(300); await hu.loopFn();
         assert.ok(!frame().vrect, 'setting off: no video while driving again');
         console.log('ok   Video while driving setting keeps the picture while moving');
-        ['ov:rw', 'ov:play', 'ov:ff'].forEach((k) => assert.ok(disp.pageTargets.some((t) => t.key === k && t.w > 120 && t.w < 300), 'podcast control ' + k + ': ' + keys()));
+        ['ov:rw', 'ov:play', 'ov:ff', 'ov:close'].forEach((k) => assert.ok(disp.pageTargets.some((t) => t.key === k && t.w > 120 && t.w < 300), 'podcast control ' + k + ': ' + keys()));
         disp.pageTargets.find((t) => t.key === 'ov:ff').run();
         await until(() => d.cmds('seek').length > seeks, 2000, 'a podcast +10 s');
         assert.ok(disp.pageTargets.some((t) => t.key === 'ov:bar' && t.turn), 'podcast: the knob seeks on the bar');
@@ -431,6 +431,29 @@ async function appFrames() {
         speedH({ speedVehicleCentreOfGravity: 0 });
         await sleep(300); await hu.loopFn();
         console.log('ok   podcast mode while driving: no picture, big controls, knob seek, Try again');
+        // Close: the video ends now (the daemon's stop: sound, speakers, decoder), off the player onto the list
+        await hu.loopFn();
+        const nStop = d.cmds('stop').length;
+        disp.pageTargets.find((t) => t.key === 'ov:close').run();
+        await until(() => d.cmds('stop').length === nStop + 1, 2000, 'Close sends stop');
+        await sleep(50); await hu.loopFn();
+        assert.ok(keys().indexOf('ov:play') < 0 && keys().indexOf('rail:search') >= 0, 'Close: back on the list: ' + keys());
+        assert.ok(frame().types.indexOf(14) >= 0, 'Close: the picture dropped (DROP_VIDEO)');
+        d.send({ ev: 'state', state: 'idle' });
+        await sleep(100);
+        // the HMI menu's Close video does the same; with nothing playing it sends nothing
+        hu.handlers.BTN_CLOSE();
+        await sleep(100);
+        assert.strictEqual(d.cmds('stop').length, nStop + 1, 'nothing playing: Close video sends nothing');
+        d.send({ ev: 'state', state: 'playing', id: 'aaa', title: 'Song' });
+        await sleep(100);
+        hu.handlers.BTN_CLOSE();
+        await until(() => d.cmds('stop').length === nStop + 2, 2000, 'Close video (HMI menu) sends stop');
+        // playing again for what follows
+        hu.handlers.BTN_NOW();
+        d.send({ ev: 'state', state: 'playing', id: 'aaa', title: 'Song' }); d.send({ ev: 'time', elapsed: 21000, total: 200000 });
+        await sleep(400); await hu.loopFn();
+        console.log('ok   Close: stop sent, the list again (overlay and HMI menu)');
     } else console.log('skip full-screen player (the stub has no full-screen placement)');
     // back to the list (the overlay's back, or the bar's list button where the HMI runs the screen): DROP_VIDEO
     if (own) disp.pageTargets.find((t) => t.key === 'ov:back').run(); else hu.handlers.BTN_LIST();
