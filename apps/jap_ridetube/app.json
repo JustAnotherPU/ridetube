@@ -378,6 +378,12 @@
       ]
     },
     {
+      "key": "ytdlp_auto",
+      "label": "Update yt-dlp by itself: the newest release, looked for daily (off: the one in this RideTube service)",
+      "type": "bool",
+      "default": true
+    },
+    {
       "key": "battery",
       "label": "Parked: pause when the 12 V battery is under",
       "type": "choice",

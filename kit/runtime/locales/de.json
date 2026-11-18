@@ -192,5 +192,6 @@
   "Video while driving is only for passengers, in a car coded for video in motion. The driver must never watch it. Follow the law where you drive. You use this setting at your own risk: the authors of RideTube are not responsible for any misuse, accident, fine or damage.": "Video beim Fahren ist nur für Beifahrer, in einem für Video in Fahrt codierten Auto. Der Fahrer darf es nie ansehen. Die Gesetze am Fahrort beachten. Nutzung dieser Einstellung auf eigenes Risiko: Die Autoren von RideTube sind nicht verantwortlich für Missbrauch, Unfälle, Bußgelder oder Schäden.",
   "Video while driving": "Video beim Fahren",
   "I agree": "Zustimmen",
-  "Agreeing needs the touchscreen. Pick any page to leave it off": "Zustimmen nur per Touchscreen. Seite wählen, damit es aus bleibt"
+  "Agreeing needs the touchscreen. Pick any page to leave it off": "Zustimmen nur per Touchscreen. Seite wählen, damit es aus bleibt",
+  "Update yt-dlp by itself: the newest release, looked for daily (off: the one in this RideTube service)": "yt-dlp selbst aktualisieren: die neueste Version, täglich gesucht (aus: die im RideTube-Dienst)"
 }

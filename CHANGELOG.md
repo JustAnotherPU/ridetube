@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- yt-dlp updates on the car (app setting "Update yt-dlp by itself", on by default; needs the new service). When
+  YouTube changes break yt-dlp, a fixed yt-dlp release is usually out within days, but the one in `ytdlp.pyz` waits
+  for the next RideTube service. The service now looks for the newest yt-dlp release itself (2 minutes after it
+  starts, then daily, and after a play fails past its retries), checks the zipapp against the release's
+  `SHA2-256SUMS`, repacks and precompiles it as `build_pyz.sh` does, imports it once, and then fetches with it;
+  `ytdlp.pyz` stays the fallback. All of it runs as the fetch uid, never as root. Service: `ytfetch.py update`, the
+  `ytdlp` command and event. An older service answers the app's `ytdlp` with "unknown cmd", which the app ignores.
+
 ## What's new since the first release
 
 The first public release was app 0.3.6 with service 0.3.7, on 4 November 2026. This is what came after it, in
