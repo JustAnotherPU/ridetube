@@ -1,5 +1,12 @@
 # Changelog
 
+## Service 0.5.2
+
+- A root-only pause for a voice assistant on the car (Majordome) while it listens: SIGWINCH does what the app's
+  pause does if a video plays, SIGUSR2 resumes it only if that pause is still the hold's (not after the user's own
+  pause, stop or new play). A hold not released within 150 s resumes by itself. The daemon writes its pid to
+  /run/jap-ridetube-d/ytd.pid once both listeners are in. The app's ctl socket is not touched.
+
 ## Service 0.5.1
 
 Videos now stream while they play instead of being downloaded whole. This builds on @7amoody1985's work in #20.

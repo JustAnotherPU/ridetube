@@ -25,7 +25,7 @@ const MEDIA_FILES = ['audio.m4a', 'index.bin', 'video.h264'];
 const VIDEO_DIR_MODE = 0o711;
 // thumb.rgba length -> [w, h]: 160x90 in caches from older proxies, 320x180 since 0.1.6
 const THUMB_SIZES = { 57600: [160, 90], 230400: [320, 180] };
-const VERSION = '0.5.1';   // component.json's (test_ytd.js checks): sent with a log report
+const VERSION = '0.5.2';   // component.json's (test_ytd.js checks): sent with a log report
 // the day this build was released (UTC), bumped with VERSION at each release (tools/release.py refuses one in the
 // future). A head unit clock before it is provably wrong: only then does TLS skip the certificate dates (certTime)
 const BUILT = '2026-11-21';
@@ -95,6 +95,7 @@ function defaults() {
         dlStopFreeMb: 1024,  // a download under way stops below this much free (it starts again from scratch with minFreeMb)     // a download starts only with this much free where the cache is (/var/opt, shared with the Store)
         freeMb: null,        // (tests) dir -> MB free; null: df
         heldStopMs: 3000,    // paused but the player plays on: STOP again at most this often, then release the audio
+        micHoldMs: 150000,   // Majordome's mic hold not released this long (it crashed): released by itself
         dlNetWaitMs: 60000,  // a download failing for the network (not counted): the queue waits this long
         dlTries: 3,          // a download failing this often (network, not the video) is given up until it is asked again
         autoEveryMs: 1800000, // auto-downloads: Subscriptions looked at this often, on Wi-Fi only
@@ -2051,6 +2052,7 @@ Daemon.prototype.remoteUid = function () {
 };
 Daemon.prototype.proxy = function (mode) { return this.notImplemented('proxy'); };            // WP11, later
 Daemon.prototype.setState = function (s) {
+    if (s !== 'paused' && this.micHeld) { clearTimeout(this.micHeld.timer); this.micHeld = null; }   // played, stopped, failed: no longer the hold's pause
     this.state = s;
     this.sendState();
 };
@@ -2994,6 +2996,31 @@ Daemon.prototype.resume = async function () {
     this.toYtdec('resume');
     await this.audio.button('PLAY');
 };
+// Majordome's mic hold (0.5.2; its mic has no echo cancelling: it heard the video, not the driver). Root only and out of
+// band (SIGWINCH, SIGUSR2 to the pid in ytd.pid), never through the app's single ctl client. hold: the app's own pause,
+// if it plays; again while held: the timer re-armed. release: the app's own resume, only while that pause is still the
+// hold's (any other state meanwhile drops it: setState). Not released within micHoldMs: released by itself
+Daemon.prototype.micArm = function () {
+    clearTimeout(this.micHeld.timer);
+    this.micHeld.timer = setTimeout(() => this.guard(() => this.micRelease('none in ' + this.opts.micHoldMs + ' ms')), this.opts.micHoldMs);
+};
+Daemon.prototype.micHold = function () {
+    if (this.micHeld) return this.micArm();
+    if (this.state !== 'playing' || this.waiting()) return undefined;   // (waiting: pause() would only defer it, no 'paused')
+    const p = this.pause();   // 'paused' set before its first await
+    if (this.state !== 'paused') return p;
+    this.micHeld = {};
+    this.micArm();
+    this.log('mic hold: paused');
+    return p;
+};
+Daemon.prototype.micRelease = function (why) {
+    if (!this.micHeld) return undefined;
+    clearTimeout(this.micHeld.timer);
+    this.micHeld = null;
+    this.log('mic hold: released (' + why + '): resume');
+    return this.resume();
+};
 // The player stopped (our STOP, or it ran dry): start the file again at stoppedAt. Stopped, it ignores playFile and PLAY
 // (car, 2026-11-03): a new connection, as a new video starts. why: the error's prefix if that fails.
 // Until our setTime the new file's times (from 0) are not the place (QJZ9TX). A newer replayAt (a second resume, an
@@ -3331,6 +3358,7 @@ Daemon.prototype.watchdog = function () {
 
 Daemon.prototype.close = async function () {
     this.closed = true;   // no download starts from here (a stop, a late client-gone)
+    if (this.micHeld) { clearTimeout(this.micHeld.timer); this.micHeld = null; }
     this.timers.forEach(clearInterval);
     [this.spare, this.extracting, this.ytdlpRun].forEach((x) => { if (x) { try { x.child.kill('SIGKILL'); } catch (e) { /* gone */ } } });
     this.spare = this.extracting = this.ytdlpRun = null;
@@ -3386,6 +3414,11 @@ if (require.main === module && process.argv[2] === '--someip-gen') {
         setTimeout(() => process.exit(0), 4000); // TimeoutStopSec=5
         d.close().then(() => process.exit(0), () => process.exit(0));
     }));
+    // Majordome's mic hold (micHold): not SIGUSR1, which opens Node's inspector (root) in a process without a listener.
+    // ytd.pid is written once both listeners are in: Majordome signals only a daemon that has them (0.5.1 writes none)
+    process.on('SIGWINCH', () => d.guard(() => d.micHold()));
+    process.on('SIGUSR2', () => d.guard(() => d.micRelease('Majordome')));
+    try { fs.writeFileSync(path.join(path.dirname(d.opts.sock), 'ytd.pid'), process.pid + '\n'); } catch (e) { d.log('ytd.pid: ' + e.message); }
     d.start().catch((e) => {
         if (!(e && e.refuse)) return d.fault(e);
         d.log(e.message);

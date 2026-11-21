@@ -278,6 +278,92 @@ async function main() {
         subs.playerState('PLAYER_STATE_PLAY');
     };
 
+    // what a pause then a resume does: SOME/IP calls, ytdec's stdin, the app's state events
+    const pauseResume = async (pause, resume) => {
+        await playing();
+        tick(10000);
+        calls.length = 0; fs.writeFileSync(ytlog, ''); c.clear();
+        pause();
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+        resume();
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+        await waitUntil(() => called('playFile').length > 0);
+        tick(0);
+        await waitUntil(() => called('setTime').length > 0);
+        return { buttons: called('sendButtonEvent').map((x) => x.a.button), connects: called('connect').length, playFile: called('playFile').map((x) => x.a.path),
+            setTime: called('setTime').map((x) => x.a.newTimeElapsed), states: c.evs.filter((x) => x.ev === 'state').map((x) => x.state),
+            ytdec: ytdecLines().map((l) => l.split(' ').slice(1).join(' ')).filter((l) => /^in (pause|resume|seek)/.test(l)) };
+    };
+    const stopped = async () => { c.send({ cmd: 'stop' }); await c.waitFor((x) => x.ev === 'state' && x.state === 'idle'); };
+    await t('Majordome\'s mic hold (SIGWINCH) and release (SIGUSR2) do exactly what the app\'s pause and resume do', async () => {
+        const app = await pauseResume(() => c.send({ cmd: 'pause' }), () => c.send({ cmd: 'resume' }));
+        await stopped();
+        const mic = await pauseResume(() => d.micHold(), () => d.micRelease('test'));
+        await stopped();
+        assert.deepStrictEqual(app.buttons, ['STOP', 'STOP'], JSON.stringify(app));   // pause = STOP; resume releases (STOP, disconnect), connects again
+        assert.deepStrictEqual(app.setTime, [10000]);
+        assert.deepStrictEqual(mic, app);
+    });
+    await t('mic hold: kept by a second hold (a follow-up listen); never resumes over the user\'s own pause, stop or play', async () => {
+        await playing();
+        tick(10000);
+        d.micHold();
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+        calls.length = 0;
+        d.micHold();   // the follow-up's hold: still paused, nothing sent
+        assert.strictEqual(d.state, 'paused');
+        assert.deepStrictEqual(called('sendButtonEvent'), []);
+        // the user resumes, then pauses, while held: the release leaves his pause
+        c.clear();
+        c.send({ cmd: 'resume' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+        await waitUntil(() => called('playFile').length > 0);
+        tick(0); await waitUntil(() => called('setTime').length > 0);
+        c.send({ cmd: 'pause' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+        d.micRelease('test');
+        await sleep(200);
+        assert.strictEqual(d.state, 'paused', 'his pause kept');
+        // paused by the user: a hold takes nothing, its release resumes nothing
+        d.micHold(); d.micRelease('test');
+        await sleep(200);
+        assert.strictEqual(d.state, 'paused');
+        // a stop, a new play while held: dropped
+        d.micRelease('none'); c.clear();
+        const n = called('playFile').length;
+        c.send({ cmd: 'resume' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+        await waitUntil(() => called('playFile').length > n);
+        tick(0); await waitUntil(() => called('setTime').length > 1);
+        d.micHold();
+        assert.strictEqual(d.state, 'paused');
+        await stopped();
+        assert.strictEqual(d.micHeld, null);
+        await playing();
+        d.micRelease('test');
+        await sleep(200);
+        assert.strictEqual(d.state, 'playing');
+        // not playing: nothing
+        await stopped();
+        d.micHold();
+        assert.strictEqual(d.micHeld, null);
+        assert.strictEqual(d.state, 'idle');
+    });
+    await t('mic hold: not released within micHoldMs (Majordome gone) -> resumed by itself', async () => {
+        d.opts.micHoldMs = 300;
+        try {
+            await playing();
+            tick(10000);
+            c.clear();
+            d.micHold();
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'playing', 2000);
+            assert.ok(logs.some((l) => /mic hold: released \(none in 300 ms\)/.test(l)));
+            tick(0); await sleep(100);
+            await stopped();
+        } finally { d.opts.micHoldMs = 150000; }
+    });
+
     await t('app disconnect stops within 1 s', async () => {
         await playing();
         const child = d.child;
