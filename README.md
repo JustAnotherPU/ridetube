@@ -32,8 +32,9 @@ the car, over the car's own internet connection:
 - The sound plays through the car's own media player.
 - While driving, the picture is replaced by a podcast view (title, progress, controls) and the sound plays on.
   The picture comes back when the car is parked again.
-- The video playing is downloaded to the head unit in full while it plays, then deleted: expect the video's whole
-  size on your data plan, even if you stop early. The download stops if the head unit's storage gets low.
+- Videos stream. The head unit fetches about 2 minutes ahead of where you are, keeps that part in RAM (a few
+  tens of MB at most) and drops what you have watched, so stopping after five minutes uses about five minutes of
+  data. A far seek, forward or back, usually starts playing in a second or two.
 - **Download** in the player keeps a video on the car until you remove it (press **Downloaded**). Downloads play
   with no internet, from **Library** on the rail or **On this car** on Home, signed in or not. One downloads at a
   time, never while a video plays, and only with at least 4 GB free on the head unit.
@@ -108,8 +109,8 @@ One car only so far. Reports from other cars are welcome in the issues.
   fetches the newest yt-dlp release on the car, checked against the release's sha256 sums, daily and after a play
   fails; off, a fixed RideTube release brings a new yt-dlp (see `native/jap-ridetube-d/README.md`, "Updating
   yt-dlp").
-- H.264 only (up to 720p, 30 fps preferred), decoded on the head unit's GPU. A video with no H.264 stream
-  does not play.
+- H.264 or VP9 (profile 0), up to 720p with 30 fps preferred, decoded on the head unit's GPU. Videos offered
+  only in other formats (AV1, HDR) do not play.
 - Signing in uses the TV device sign-in that YouTube's TV apps use. The client id is read from YouTube's TV
   page when you sign in; RideTube ships none.
 - The switch from the first seconds of sound to the full file may be heard as a short break.
