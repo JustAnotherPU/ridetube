@@ -17,6 +17,7 @@
  *                    searches, Clear; then the last search's results, a grid
  *           pl       the account's playlists, a grid (the first video's picture, the video count); one opens as
  *           list     its videos, a grid (the controller pushed left at the rail: back to Playlists)
+ *           library  (cap download) Continue watching and On this car: the downloads, played with no network
  *           Not signed in, on a feed page: the sign-in card, a QR code for google.com/device and the code to
  *           enter there (the daemon's TV device sign-in: it keeps the account, the app never sees a token).
  *           The page scrolls (a finger, the controller turned on the page); the controller pushed or turned onto
@@ -94,7 +95,7 @@ const SEARCH_MS = 8000;                                  // a search with no ans
 const SUGGEST = ['Music', 'News', 'Cars', 'Podcasts', 'Comedy', 'Trailers'];
 const SLOTS = ['BTN_S1', 'BTN_S2', 'BTN_S3', 'BTN_S4', 'BTN_S5', 'BTN_S6'];
 const TABS = ['home', 'subs', 'wl', 'pl'];
-const NAMES = { home: 'Home', subs: 'Subscriptions', wl: 'Watch later', pl: 'Playlists', list: 'Playlist', results: 'Results', hist: 'History', health: 'Health check', remote: 'Phone remote' };
+const NAMES = { home: 'Home', subs: 'Subscriptions', wl: 'Watch later', pl: 'Playlists', list: 'Playlist', results: 'Results', hist: 'History', health: 'Health check', remote: 'Phone remote', library: 'Library' };
 const FEED_MS = 15000;                                   // a feed with no answer by then is an error on screen
 const SIGNIN_URL = 'https://www.google.com/device';
 const APP_VERSION = String(mgu.SPEC.version).split('-')[0];   // (a localized build's "0.3.12-zh.cn.4": the release's)
@@ -150,7 +151,8 @@ mgu.run({
         const model = new Model((o) => ctl.send(o), JSON.parse(helloSent));
         // yt-dlp updates (the daemon fetches the newest yt-dlp release itself): the setting, told on connect and on a change
         model.ytdlpAuto = settings.get('ytdlp_auto') !== false;
-        settings.onChange((key, value) => { if (key === 'ytdlp_auto') model.setYtdlpAuto(value !== false); });
+        model.autoDl = Number(settings.get('auto_download')) || 0;   // (0.6.0) new Subscriptions videos kept on the car, on Wi-Fi
+        settings.onChange((key, value) => { if (key === 'ytdlp_auto') model.setYtdlpAuto(value !== false); if (key === 'auto_download') model.setAutoDl(value); });
         let mode = 'home', browse = 'home', dirty = true;   // browse: the list the player goes back to
         const changed = () => { dirty = true; if (ctx.background) ctx.background('playing', model.active()); labels(); };
         const isFeed = (m) => FEEDS.indexOf(m) >= 0;
@@ -172,7 +174,7 @@ mgu.run({
             if (m === 'risk') riskAsk = true;
             if (m !== mode) { dirty = true; if (laid.mode === mode && laid.where[focusKey]) backKey[mode] = focusKey; }   // (a tile of this page)
             mode = m;
-            if (m !== 'player' && m !== 'logs' && m !== 'clock' && m !== 'risk' && m !== 'news') browse = m; else if (m === 'player') wake();
+            if (m !== 'player' && m !== 'logs' && m !== 'clock' && m !== 'risk' && m !== 'news' && m !== 'signin') browse = m; else if (m === 'player') wake();
             openFeed(); sync(); labels();
         }
         function goBack(m) {
@@ -187,7 +189,7 @@ mgu.run({
             if (remote) remote.onMsg(m);
             if (m.ev === 'error') log.warn('jap-ridetube-d: ' + m.msg);
             if (m.ev === 'state') log.info('jap-ridetube-d: ' + m.state + (m.id ? ' ' + m.id : ''));
-            if (m.ev === 'auth') { log.info('jap-ridetube-d: account ' + m.state); if (m.state === 'signed_in') openFeed(); }
+            if (m.ev === 'auth') { log.info('jap-ridetube-d: account ' + m.state); if (m.state === 'signed_in') { if (mode === 'signin') show('home'); openFeed(); } }
             changed();
         });
         ctl.connect();
@@ -253,6 +255,7 @@ mgu.run({
         [['BTN_HOME', 'home'], ['BTN_SUBS', 'subs'], ['BTN_WL', 'wl'], ['BTN_PL', 'pl']].forEach(([b, m]) => ui.onClick(b, () => { show(m); ui.open('VIEW'); }));
         // 0.4.0 services (caps; labels() hides the entries otherwise): History; the health check, run on each press
         ui.onClick('BTN_HIST', () => { if (model.can('hist')) { show('hist'); ui.open('VIEW'); } });
+        ui.onClick('BTN_LIB', () => { if (model.can('download')) { show('library'); ui.open('VIEW'); } });
         ui.onClick('BTN_HEALTH', () => { if (model.can('health')) { model.runHealth(); show('health'); ui.open('VIEW'); } });
         // 0.4.3 (cap remote): the phone remote page; pressed again there where the HMI runs the screen (no button drawn): on / off
         ui.onClick('BTN_REMOTE', () => {
@@ -275,7 +278,7 @@ mgu.run({
         // Sign in: the Home tab shows how (after a failed try, asks again). Sign out: pressed twice within 5 s
         let signOutArmed = null;
         ui.onClick('BTN_ACCOUNT', () => {
-            if (model.auth.state !== 'signed_in') { show('home'); model.authStart(true); ui.open('VIEW'); return; }
+            if (model.auth.state !== 'signed_in') { show(offlineSecs().length ? 'signin' : 'home'); model.authStart(true); ui.open('VIEW'); return; }
             if (!signOutArmed) { signOutArmed = setTimeout(() => { signOutArmed = null; labels(); }, 5000); labels(); return; }
             clearTimeout(signOutArmed); signOutArmed = null;
             model.signOut();
@@ -396,8 +399,8 @@ mgu.run({
         }
         let lastPlay = null, lastList = null, lastAcct = null, lastCaps = null;
         function labels() {
-            const caps = [model.can('hist'), model.can('health'), model.can('remote')];
-            if (String(caps) !== lastCaps && ui.visible) { lastCaps = String(caps); ui.visible('BTN_HIST', caps[0]); ui.visible('BTN_HEALTH', caps[1]); ui.visible('BTN_REMOTE', caps[2]); }
+            const caps = [model.can('hist'), model.can('health'), model.can('remote'), model.can('download')];
+            if (String(caps) !== lastCaps && ui.visible) { lastCaps = String(caps); ui.visible('BTN_HIST', caps[0]); ui.visible('BTN_HEALTH', caps[1]); ui.visible('BTN_REMOTE', caps[2]); ui.visible('BTN_LIB', caps[3]); }
             const p = model.state === 'playing' ? 'Pause' : 'Play';
             if (p !== lastPlay) { lastPlay = p; ui.text('BTN_PLAY', translate(p)); }
             const l = mode === 'player' ? NAMES[browse] : model.active() ? 'Now playing' : 'Player';
@@ -711,6 +714,7 @@ mgu.run({
             if (mode === 'risk') { goBack(riskFrom); return true; }
             if (mode === 'clock') { goBack(clockFrom); return true; }
             if (mode === 'news') { goBack(newsFrom); return true; }
+            if (mode === 'signin') { goBack('home'); return true; }
             return false;
         });
 
@@ -827,12 +831,16 @@ mgu.run({
                 cv.arc(x, y, 14, 17.5, 20, 300, c); cv.quad([[x - 22, y - 5], [x - 7, y - 6], [x - 15, y - 17], [x - 22, y - 5]], c);
                 cv.line(x, y + 1, x, y - 8, 3.5, c); cv.line(x, y, x + 6, y + 4, 3.5, c);
             }, 'hist'],
+            ['library', 'Library', (cv, x, y, c) => {             // an arrow down onto a tray: on this car
+                cv.line(x, y - 17, x, y + 3, 5, c); cv.polyline([[x - 10, y - 6], [x, y + 5], [x + 10, y - 6]], 5, c);
+                cv.roundRect(x - 17, y + 11, 34, 5, 2.5, c);
+            }, 'download'],
         ];
-        // pages of later packages: mode -> draw(cv), dispatched by render (none yet)
+        // pages of later packages: mode -> draw(cv), dispatched by render
         const PAGES = {};
         // while something plays: back to the player (the bar's Now playing, where the kit runs the screen)
         const PLAYING = ['player', 'Playing', (cv, x, y, c) => { [10, 20, 14].forEach((h, k) => cv.roundRect(x - 15 + k * 11, y + 8 - h, 8, h + 8, 2, c)); }];
-        const railSel = () => (mode === 'results' ? 'search' : mode === 'channel' ? 'subs' : mode === 'list' ? 'pl' : mode);   // the entry lit
+        const railSel = () => (mode === 'results' ? 'search' : mode === 'channel' ? 'subs' : mode === 'list' ? 'pl' : mode === 'signin' ? 'home' : mode);   // the entry lit
         function drawRail(cv) {
             const sel = railSel(), bottom = H + (cv.own ? cv.extra : 0);
             const rail = RAIL.concat(RAIL_MORE.filter((r) => model.can(r[3])));
@@ -844,7 +852,7 @@ mgu.run({
                 const cx = 62 + RX, cy = cv.own ? Math.round(pitch * (i + 0.5)) - 4 : 96 + Math.round(i * pitch), on = m === sel, bg = on ? '#2c2c2c' : C.bg, c = on ? '#ffffff' : C.dim;
                 if (on) { cv.roundRect(18 + RX, cy - 38, 90, 84, 16, bg); cv.roundRect(18 + RX, cy - 14, 5, 28, 2.5, C.red); }
                 glyph(cv, cx, cy - 8, c, bg);
-                cv.text(translate(name === 'Subscriptions' ? 'Subs' : name === 'Watch later' && dict.Later ? 'Later' : name), cx, cy + 34, 18, c, { literal: true, align: 'center', font: on ? 'bold' : 'label' });
+                cv.text(fit(cv, translate(name === 'Subscriptions' ? 'Subs' : name === 'Watch later' && dict.Later ? 'Later' : name === 'Library' && dict.Lib ? 'Lib' : name), 18, 90, { literal: true, font: on ? 'bold' : 'label' }), cx, cy + 34, 18, c, { literal: true, align: 'center', font: on ? 'bold' : 'label' });
                 const th = Math.min(84, Math.floor(pitch));     // (more entries: the targets as tall as the pitch, never overlapping)
                 if (cv.own) cv.target(16 + RX, cy + 4 - th / 2, 92, th, () => show(m === 'search' ? 'results' : m), 'rail:' + m, 16);
             });
@@ -888,8 +896,23 @@ mgu.run({
             lines.forEach((l, k) => cv.text(l, x, y + TH + 32 + k * 30, 24, C.text, LITB));
             const my = y + TH + 32 + lines.length * 30 - 2;
             const meta = [r.channel].concat(Array.isArray(r.meta) ? r.meta : []).filter((m) => typeof m === 'string' && m).join(' · ');
-            if (meta) cv.text(fit(cv, meta, 20, TW, LIT), x, my, 20, C.dim, LIT);
+            if (r.ready === false) cv.text(fit(cv, dlText(r), 20, TW, LITB), x, my, 20, r.error ? '#ff8a80' : '#ffd27a', LITB);   // a download not on the car yet
+            else if (meta) cv.text(fit(cv, meta, 20, TW, LIT), x, my, 20, C.dim, LIT);
         }
+        // a download's state, as its tile and the player's button say it
+        const dlText = (r) => (r.error === 'not enough space' ? translate('Not enough space') : r.error ? translate('Download failed')
+            : r.pct > 0 ? message('Downloading {percent} %', { percent: r.pct }) : translate('Downloading...'));
+        // Continue watching and On this car: what plays signed out, offline (cap download for the second)
+        const offlineSecs = () => (model.resume.length ? [{ title: translate('Continue watching'), items: model.resume }] : [])
+            .concat(model.library.length ? [{ title: translate('On this car'), items: model.library.slice(0, SHELF_MAX) }] : []);
+        PAGES.library = (cv) => {
+            if (!model.connected) return say(cv, OFF, OFF2);
+            const n = model.downloaded().length, secs = (model.library.length ? [{ title: translate('On this car'), sub: count(n, '{count} video', '{count} videos'), items: model.library, grid: true }] : [])
+                .concat(model.resume.length ? [{ title: translate('Continue watching'), items: model.resume }] : []);
+            if (!secs.length) return say(cv, translate('Nothing on this car yet'), translate('Download a video in the player to watch it with no internet'));
+            drawPage(cv, secs);
+        };
+        PAGES.signin = (cv) => (model.connected ? drawSignIn(cv) : say(cv, OFF, OFF2));
 
         /* a playlist: its first video's picture (two edges behind it: a stack), the video count, its name, its meta */
         function drawPlTile(cv, r, x, y, key) {
@@ -1118,7 +1141,14 @@ mgu.run({
             const f = model.feeds[which], a = model.auth.state;
             if (!model.connected) return say(cv, OFF, OFF2);
             if (a === 'unsupported') return say(cv, translate('Signing in needs a newer jap-ridetube-d tool on the car'));
+            const off = which === 'home' ? offlineSecs() : [];
+            if (a !== 'signed_in' && off.length) {   // signed out: what plays without the account, then how to sign in
+                const signin = { id: '::signin', title: translate('Sign in'), sub: translate('Your Home, Subscriptions, Watch later and playlists, on the car'),
+                    glyph: (c2, x, y) => logo(c2, x, y, 96), act: () => { show('signin'); model.authStart(true); } };
+                return drawPage(cv, [Object.assign({}, off[0], { items: [signin].concat(off[0].items) })].concat(off.slice(1)));   // first, as Search's own tiles
+            }
             if (a !== 'signed_in') return drawSignIn(cv);
+            if (off.length && f && !f.items.length && f.error) return drawPage(cv, off);   // no internet: what is on the car
             const chans = which === 'subs' && model.chans && model.chans.items.length;   // the channels show without the videos
             if ((!f || !f.items.length) && !chans) {
                 return say(cv, !f || f.loading ? message('Loading {name}...', { name: translate(NAMES[which]) }) : f.error === 'feed offline' ? translate('The video service is not reachable - check the car\'s internet connection')
@@ -1127,7 +1157,7 @@ mgu.run({
             let secs;
             if (which === 'home') {
                 const wl = model.feeds.wl;
-                secs = (model.resume.length ? [{ title: translate('Continue watching'), items: model.resume }] : [])
+                secs = offlineSecs()
                     .concat(f.shelves || [{ title: translate('Recommended'), items: f.items, grid: true }])
                     .concat(wl && wl.items.length ? [{ title: translate('Watch later'), items: wl.items.slice(0, SHELF_MAX) }] : []);
             } else secs = !f ? [] : f.shelves && which !== 'wl' ? f.shelves : [{ title: translate(NAMES[which]), sub: count(f.items.length, '{count} videos', '{count} videos') + (f.loading ? ' · ' + translate('Loading...') : ''), items: f.items, grid: true }];
@@ -1301,6 +1331,7 @@ mgu.run({
             if (mid) {
                 if (model.state === 'paused') { cv.circle(cx, cy - 40, 46, '#000000a0'); tri(cv, cx + 4, cy - 40, 36, '#ffffff'); }
                 cv.text(fit(cv, mid, 34, 1500, LIT), W / 2, BOX.y + BOX.h / 2 + (model.state === 'paused' ? 50 : 12), 34, '#ffffff', { literal: true, align: 'center' });
+                if (offlineHint()) cv.text(fit(cv, offlineHint(), 26, 1500, LIT), W / 2, BOX.y + BOX.h / 2 + 56, 26, '#ffd27a', { literal: true, align: 'center' });
             }
             // the progress bar at the bottom: the track, the part played, the scrubber; the times under it
             if (model.total > 0 && model.active() && model.state !== 'preparing') {
@@ -1320,6 +1351,9 @@ mgu.run({
          * controller stays on its key, so a turn or a press wakes it; a tap anywhere too).
          */
         const OVK = ['ov:back', 'ov:qr', 'ov:close', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'];
+        const ovKeys = () => (model.can('download') && model.id ? OVK.slice(0, 2).concat('ov:dl', OVK.slice(2)) : OVK);
+        // a play failed with no internet while downloads are on the car: where they are
+        const offlineHint = () => (model.state === 'error' && model.errorOffline && model.downloaded().length ? translate('Downloaded videos still play - Library') : null);
         // podcast mode (driving): artwork, title, chapter, the bar with chapter ticks and skipped segments, controls
         // a glove can hit (-10 s, play/pause, +10 s (held: previous / next), Close), the next video, a skipped-sponsor notice
         function drawPodcast(cv, SW, SH, LX, tg, run, live) {
@@ -1412,6 +1446,7 @@ mgu.run({
             if (model.state === 'error') cv.text(fit(cv, translate('Error: ') + (model.error ? whole(model.error) : translate('playback stopped')), 28, bw, LIT), x0, SH - 54, 28, '#ff6b6b', LIT);
             if (barT) barT();
         }
+        let removeArmed = null;   // {id, t}: the player's Downloaded pressed once (ov:dl)
         function drawFull(cv) {
             const pl = cv.place, s = pl.scale, SW = pl.w / s, SH = pl.h / s, dx = pl.ox / s, dy = pl.oy / s;
             cv.chrome = null;              // no header or bar composed over it (display.js present)
@@ -1425,7 +1460,7 @@ mgu.run({
             picArea = pod ? null : { SW, s, ctls };        // double taps: the video player only (podcast mode has its big buttons)
             if (videoShown && !pod) cv.video(VID, 0, 0, pl.w, pl.h, 0);
             if (!overlay() && !pod) {
-                cv.xf(); OVK.forEach((k) => tg(0, 0, SW, SH, wake, k, 0, k === 'ov:bar' ? turnSeek : undefined));
+                cv.xf(); ovKeys().forEach((k) => tg(0, 0, SW, SH, wake, k, 0, k === 'ov:bar' ? turnSeek : undefined));
                 picArea.ctls = [];                         // (hidden: those keys only wake it, no control under a tap)
                 return;
             }
@@ -1445,9 +1480,30 @@ mgu.run({
             const bx = LX + 44, by = 52;
             ctl('ov:back', bx, by, 30, () => goBack(browse), (c) => cv.polyline([[bx + 5, by - 12], [bx - 7, by], [bx + 5, by + 12]], 5, c));
             const ch = model.channel || (model.item(model.id) || {}).channel;
-            if (model.title) cv.text(fit(cv, model.title, 30, SW - LX - 160, LITB), LX + 96, by - 4, 30, '#ffffff', LITB);
-            if (ch) cv.text(fit(cv, ch, 22, SW - LX - 300, LIT), LX + 96, by + 30, 22, '#cccccc', LIT);
-            // top right, On phone: a QR code of the video's public link at this second (nothing is kept on the car)
+            // top right, Download (cap download), left of On phone: a press downloads the video; on one downloaded (or on its
+            // way), the first press asks "Press again to remove" for 5 s (as Sign out), the second removes it
+            let tright = SW - 64;
+            if (model.id && model.can('download')) {
+                const sv = model.saved(model.id), dlx = SW - 150 - 42 - cv.textWidth(translate('On phone'), 24, LIT) - 70;
+                const armed = !!removeArmed && removeArmed.id === model.id && !!sv && !sv.error;
+                const label = armed ? translate('Press again to remove') : !sv ? translate('Download') : sv.ready ? translate('Downloaded') : dlText(sv);
+                ctl('ov:dl', dlx, by, 30, () => {
+                    if (!sv || sv.error) { model.download(model.id, String(settings.get('quality') || 'auto')); return; }
+                    if (removeArmed) clearTimeout(removeArmed.t);
+                    if (armed) { removeArmed = null; model.remove(model.id); return; }
+                    const a = removeArmed = { id: model.id, t: setTimeout(() => { if (removeArmed === a) { removeArmed = null; dirty = true; } }, 5000) };
+                }, (c) => {
+                    if (sv && sv.ready) cv.polyline([[dlx - 12, by], [dlx - 3, by + 10], [dlx + 13, by - 9]], 5, c);
+                    else { cv.line(dlx, by - 15, dlx, by + 4, 4, c); cv.polyline([[dlx - 9, by - 5], [dlx, by + 5], [dlx + 9, by - 5]], 4, c); cv.roundRect(dlx - 13, by + 10, 26, 4, 2, c); }
+                    if (sv && !sv.ready && !sv.error && sv.pct > 0) cv.arc(dlx, by, 27, 31, 0, sv.pct * 3.6, C.red, { round: true });
+                });
+                const lw = cv.textWidth(label, 24, LIT);
+                cv.text(label, dlx - 42, by + 9, 24, sv && sv.error ? '#ff8a80' : '#ffffff', Object.assign({}, LIT, { align: 'right' }));
+                tright = dlx - 42 - lw - 24;
+            }
+            if (model.title) cv.text(fit(cv, model.title, 30, Math.min(SW - LX - 160, tright - LX - 96), LITB), LX + 96, by - 4, 30, '#ffffff', LITB);
+            if (ch) cv.text(fit(cv, ch, 22, Math.min(SW - LX - 300, tright - LX - 96), LIT), LX + 96, by + 30, 22, '#cccccc', LIT);
+            // top right, On phone: a QR code of the video's public link at this second
             if (model.id) {
                 const px = SW - 150;
                 ctl('ov:qr', px, by, 30, () => { qrUntil = qrUntil > Date.now() ? 0 : Date.now() + 30000; qrAt = model.elapsed; }, (c) => {
@@ -1530,6 +1586,7 @@ mgu.run({
                 cv.text(whole('Send logs'), lx, cy + 100, 26, '#dddddd', { literal: true, align: 'center' });
             }
             if (mid) cv.text(fit(cv, mid, 30, SW - 2 * LX, LIT), cx, model.state === 'preparing' || live || up || (model.state === 'error' && model.id) ? cy + 150 : cy + 10, 30, '#ffffff', { literal: true, align: 'center' });
+            if (mid && offlineHint()) cv.text(fit(cv, offlineHint(), 26, SW - 2 * LX, LIT), cx, model.id ? cy + 196 : cy + 56, 26, '#ffd27a', { literal: true, align: 'center' });
             // bottom: the progress bar (the track, the part played, the scrubber) and the times; its target recorded
             // last (after Skip and Start over): the knob seeks there, so turning ends on it
             let barT = null;

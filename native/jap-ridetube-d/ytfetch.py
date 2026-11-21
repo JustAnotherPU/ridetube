@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""jap-ridetube-d on-car fetcher: yt-dlp (from ytdlp.pyz) + a streaming fMP4 -> Annex-B/MGYI demuxer.
+"""jap-ridetube-d on-car fetcher: yt-dlp (from ytdlp.pyz) + streaming fMP4 -> Annex-B and WebM -> VP9 frames, MGYI demuxers.
 
-  ytfetch.py fetch <id> <dir> --cache-dir <d> [--height 720] [--node P] [--lease P] [--pyz P]
+  ytfetch.py fetch <id> <dir> --cache-dir <d> [--height 720] [--avc1] [--node P] [--lease P] [--pyz P]
   ytfetch.py extract <id> <info.json> --cache-dir <d> [...]
   ytfetch.py serve --cache-dir <d> [...]
-  ytfetch.py check [<id>] --cache-dir <d> [--uid N] [--node P] [--lease P] [--pyz P] [--json]
+  ytfetch.py check [<id>] --cache-dir <d> [--avc1] [--uid N] [--node P] [--lease P] [--pyz P] [--json]
   ytfetch.py request --cache-dir <d> [--lease P]      (one request as JSON on stdin, see request_cmd)
   ytfetch.py update --cache-dir <d> [--lease P] [--pyz P] [--releases URL]
   --no-cert-time (any command): TLS skips only the certificates' validity dates (the head unit's clock is wrong)
@@ -12,6 +12,9 @@
 fetch writes <dir>/meta.json, audio.m4a, video.h264 (+ .part while running) and index.bin, and prints
 one JSON event per line on stdout: meta, audio, audio_head, audio_ready, video, done | error (then exit 1).
 audio_head {ms, bytes}: <dir>/audio.head.m4a is a complete MP4 of the audio's first ms, before audio.m4a.
+Video: VP9 (webm, profile 0) when there is one at the height step, else H.264; --avc1: H.264 only. A VP9 video.h264
+holds raw VP9 frames and index.bin says so (codec "VP9 " at offset 20; zero = H.264). A VP9 stream it cannot read is
+error "vp9: ..." (the daemon fetches again with --avc1).
 fetch --info <f>: the extraction extract wrote there (if fresh), not a new one: ~2.5 s less on the car.
 serve: loads yt-dlp (~1.2 s on the car), prints {"ev":"warm"}, then runs the one argv list read from stdin.
 check is the owner's self-test, run as root over ssh (it drops to the fetch uid itself). check --json: only its
@@ -36,7 +39,8 @@ import urllib.request
 from fractions import Fraction
 
 ID_RE = re.compile(r'^[A-Za-z0-9_-]{11}$')
-HDR = struct.Struct('<4sHHHHHxxI12x')  # 32 bytes, record count at offset 16
+HDR = struct.Struct('<4sHHHHHxxI4s8x')  # 32 bytes, record count at offset 16, codec at 20
+VP9 = b'VP9 '                            # index.bin codec (ytdec: MFX_CODEC_VP9); H.264 leaves it zero
 REC = struct.Struct('<IQIB')            # 17 bytes: pts_ms, pos, size, key
 CA = '/var/opt/mgu-python/current/ssl/cacert.pem'
 NODE = '/var/opt/jap-node22/current/bin/node'
@@ -49,24 +53,32 @@ AUDIO_CONNS, AUDIO_FIRST, AUDIO_CHUNK = 4, 1 << 20, 2 << 20
 HEAD_MIN_MS = 60000  # audio.head.m4a covers at least this, and 1.5x the rest's estimated download time
 
 
-def video_fmt(h):
-    # https only: an HLS (m3u8) pick needs ffmpeg, which the head unit doesn't have
+def video_fmt(h, vp9=True):
+    """VP9 (profile 0 webm: not vp9.2 HDR, not the m3u8 vp09) before H.264 at each height step.
+    https only: an HLS (m3u8) pick needs ffmpeg, which the head unit doesn't have."""
     lo = h * 9 // 10
-    v = 'bv[vcodec^=avc1][protocol=https]'
-    return f'{v}[height<={h}][height>={lo}][fps<=30]/{v}[height<={h}][fps<=30]/{v}[height<={h}]'
+    vs = (['bv[vcodec=vp9][ext=webm][protocol=https]'] if vp9 else []) + ['bv[vcodec^=avc1][protocol=https]']
+    return '/'.join(v + s for s in (f'[height<={h}][height>={lo}][fps<=30]', f'[height<={h}][fps<=30]', f'[height<={h}]')
+                    for v in vs)
+
+
+def playable_codec(f, avc1=False):
+    """a video format of a codec ytdec decodes: H.264, or (unless avc1) VP9 profile 0 in webm"""
+    vc = f.get('vcodec') or ''
+    return vc.startswith('avc1') or (not avc1 and vc == 'vp9' and f.get('ext') == 'webm')
 
 
 LIVE = ('is_live', 'is_upcoming', 'post_live')  # YouTube offers these as HLS only, until the live is processed
 
 
-def unplayable(info):
+def unplayable(info, avc1=False):
     """Why this video can't be played, shown to the user as is; None when it can."""
     if info.get('is_live') or info.get('live_status') in LIVE:
         return "Live videos can't be played yet"
-    fs = info.get('formats') or []
-    if not any((f.get('vcodec') or '').startswith('avc1') for f in fs):
+    fs = [f for f in info.get('formats') or [] if playable_codec(f, avc1)]
+    if not fs:
         return 'YouTube offers this video in no format RideTube can play'
-    if not any((f.get('vcodec') or '').startswith('avc1') and f.get('protocol') in (None, 'https') for f in fs):
+    if not any(f.get('protocol') in (None, 'https') for f in fs):
         return "This video is only offered as a stream RideTube can't play yet"
     return None
 
@@ -699,7 +711,7 @@ def demux_video(f, d, duration_s, on_progress):
                     base = min(s[2] + s[3] for s in samples)
                     dur = (samples[1][2] - samples[0][2]) if len(samples) > 1 else (tk['trex'][0] or 1)
                     fps = Fraction(tk['ts'], dur).limit_denominator(1001)
-                    os.write(ifd, HDR.pack(b'MGYI', 1, w, h, fps.numerator, fps.denominator, 0))
+                    os.write(ifd, HDR.pack(b'MGYI', 1, w, h, fps.numerator, fps.denominator, 0, bytes(4)))
                 vbuf, ibuf = [], []
                 for off, sz, sdts, cto, sf in samples:
                     o = m_at + off - data_at
@@ -727,6 +739,166 @@ def demux_video(f, d, duration_s, on_progress):
         os.close(ifd)
     if not count:
         raise ValueError('video: no frames')
+    os.replace(os.path.join(d, 'video.h264.part'), os.path.join(d, 'video.h264'))
+    return count, pos, max_ms
+
+
+# ---------------------------------------------------------------- video: WebM (Matroska) stream -> VP9 frames + MGYI
+
+EBML_MAGIC = b'\x1a'  # first byte of the EBML header ID 1A45DFA3; an MP4 starts with a box size (0x00)
+SEGMENT, CLUSTER, INFO, TRACKS = 0x18538067, 0x1F43B675, 0x1549A966, 0x1654AE6B
+SIMPLEBLOCK, BLOCKGROUP, BLOCK, REFBLOCK, TIMECODE = 0xA3, 0xA0, 0xA1, 0xFB, 0xE7
+
+
+def _vint(f, marker):
+    """An EBML ID (marker kept) or size (marker dropped; -1 = unknown) from f; None at a clean EOF."""
+    b = f.read(1)
+    if not b:
+        return None
+    n = 9 - b[0].bit_length()
+    if n > 8:
+        raise ValueError('vp9: bad EBML vint')
+    rest = f.read(n - 1)
+    if len(rest) != n - 1:
+        raise ValueError('vp9: truncated')
+    v = int.from_bytes(b + rest, 'big')
+    if marker:
+        return v
+    v &= (1 << 7 * n) - 1
+    return -1 if v == (1 << 7 * n) - 1 else v
+
+
+def _element(f):
+    eid = _vint(f, True)
+    if eid is None:
+        return None
+    size = _vint(f, False)
+    if size is None:
+        raise ValueError('vp9: truncated')
+    return eid, size
+
+
+def _body(f, n):
+    b = f.read(n)
+    if len(b) != n:
+        raise ValueError('vp9: truncated')
+    return b
+
+
+def _children(b):
+    """(id, payload) of the elements in bytes b."""
+    s = io.BytesIO(b)
+    while (el := _element(s)) is not None:
+        if el[1] < 0:
+            raise ValueError(f'vp9: unknown-size {el[0]:x} inside a sized element')
+        yield el[0], _body(s, el[1])
+
+
+def _webm_track(tracks):
+    """(number, w, h, default duration ns or 0) of the V_VP9 video track in a Tracks payload."""
+    for eid, te in _children(tracks):
+        if eid != 0xAE:
+            continue
+        t = {k: v for k, v in _children(te)}
+        if t.get(0x83) != b'\x01':
+            continue  # not video
+        if t.get(0x86, b'').rstrip(b'\0') != b'V_VP9':
+            raise ValueError(f"vp9: video track {t.get(0x86)!r}, not V_VP9")
+        v = {k: int.from_bytes(x, 'big') for k, x in _children(t.get(0xE0, b''))}
+        return int.from_bytes(t[0xD7], 'big'), v.get(0xB0, 0), v.get(0xBA, 0), int.from_bytes(t.get(0x23E383, b''), 'big')
+    raise ValueError('vp9: no video track')
+
+
+def demux_webm(f, d, duration_s, on_progress):
+    """Stream WebM from f into d/video.h264.part (raw VP9 frames, superframes whole) + d/index.bin (codec VP9).
+    Segment and Cluster may have an unknown size: their children are read in turn; anything else is read by its
+    size (Cues may come before the first Cluster). Returns (frames, bytes, max_ms)."""
+    vfd = os.open(os.path.join(d, 'video.h264.part'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    ifd = os.open(os.path.join(d, 'index.bin'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    scale, track, cluster, base, pos, count, max_ms, pending = 1000000, None, None, None, 0, 0, 0, []
+
+    def header(fps):
+        os.write(ifd, HDR.pack(b'MGYI', 1, track[1], track[2], fps.numerator, fps.denominator, 0, VP9))
+
+    def frame(rel, key, data):
+        nonlocal base
+        if cluster is None:
+            raise ValueError('vp9: block outside a cluster')
+        t = (cluster + rel) * scale  # ns
+        base = t if base is None else base
+        if not pending and not count and not key:
+            raise ValueError('vp9: first frame is not a keyframe')
+        pending.append((max(0, round((t - base) / 1e6)), key, bytes(data)))
+        if not count and not track[3] and len(pending) < 16:
+            return  # no DefaultDuration: the rate from the first 16 frames
+        if not count:
+            span = pending[-1][0] - pending[0][0]
+            header(Fraction(10 ** 9, track[3]).limit_denominator(1001) if track[3]
+                   else Fraction(1000 * (len(pending) - 1), span or 1).limit_denominator(1001))
+        flush()
+
+    def flush():
+        nonlocal pos, count, max_ms
+        if not pending:
+            return
+        recs = []
+        for ms, key, data in pending:
+            recs.append(REC.pack(ms, pos, len(data), key))
+            pos += len(data)
+            max_ms = max(max_ms, ms)
+        # order matters to the reader: bytes, then their records, then the count
+        os.write(vfd, b''.join(x[2] for x in pending))
+        os.write(ifd, b''.join(recs))
+        count += len(pending)
+        os.pwrite(ifd, struct.pack('<I', count), 16)
+        pending.clear()
+        on_progress(max_ms, count, pos)
+
+    try:
+        while (el := _element(f)) is not None:
+            eid, size = el
+            if eid in (SEGMENT, CLUSTER):
+                if eid == CLUSTER:
+                    cluster = None  # until its Timecode
+                continue  # walk into it: its children follow
+            if size < 0:
+                raise ValueError(f'vp9: unknown-size element {eid:x}')
+            if eid == INFO:
+                scale = next((int.from_bytes(v, 'big') for k, v in _children(_body(f, size)) if k == 0x2AD7B1), scale)
+            elif eid == TRACKS:
+                track = _webm_track(_body(f, size))
+            elif eid == TIMECODE:
+                cluster = int.from_bytes(_body(f, size), 'big')
+            elif eid in (SIMPLEBLOCK, BLOCKGROUP):
+                b = _body(f, size)
+                key = None
+                if eid == BLOCKGROUP:
+                    kids = dict(_children(b))
+                    if BLOCK not in kids:
+                        continue
+                    b, key = kids[BLOCK], REFBLOCK not in kids
+                if track is None:
+                    raise ValueError('vp9: block before Tracks')
+                n = 9 - b[0].bit_length()
+                tn = int.from_bytes(b[:n], 'big') & ((1 << 7 * n) - 1)
+                rel, flags = struct.unpack_from('>hB', b, n)
+                if tn != track[0]:
+                    continue
+                if flags & 0x06:
+                    raise ValueError('vp9: laced block')
+                frame(rel, bool(flags & 0x80) if key is None else key, memoryview(b)[n + 3:])
+            else:
+                while size:  # skipped by its size, in pieces
+                    size -= len(_body(f, min(size, 1 << 20)))
+        if pending and not count:
+            span = pending[-1][0] - pending[0][0]
+            header(Fraction(1000 * (len(pending) - 1), span).limit_denominator(1001) if span else Fraction(30))
+        flush()
+    finally:
+        os.close(vfd)
+        os.close(ifd)
+    if not count:
+        raise ValueError('vp9: no frames')
     os.replace(os.path.join(d, 'video.h264.part'), os.path.join(d, 'video.h264'))
     return count, pos, max_ms
 
@@ -823,9 +995,9 @@ def ydl_params(a, fmt, hook=None):
 PLAYER_CLIENTS = ['visionos']
 
 
-def usable(info):
+def usable(info, avc1=False):
     fs = info.get('formats') or []
-    return (any((f.get('vcodec') or '').startswith('avc1') and f.get('protocol') in (None, 'https') for f in fs)
+    return (any(playable_codec(f, avc1) and f.get('protocol') in (None, 'https') for f in fs)
             and any(f.get('ext') == 'm4a' and f.get('vcodec') == 'none' for f in fs))
 
 
@@ -852,7 +1024,7 @@ def extract_once(yt_dlp, a, url):
         p = dict(ydl_params(a, None), extractor_args={'youtube': {'player_client': PLAYER_CLIENTS}})
         try:
             info = yt_dlp.YoutubeDL(p).extract_info(url, download=False, process=False)
-            if usable(info):
+            if usable(info, a.avc1):
                 return info
         except Exception:  # noqa: BLE001 - fall back to the default clients
             pass
@@ -862,14 +1034,14 @@ def extract_once(yt_dlp, a, url):
 INFO_MAX_S = 1800  # stream URLs last ~6 h; a prefetch older than this is redone
 
 
-def load_info(path, vid):
+def load_info(path, vid, avc1=False):
     """extract's file for vid, if fresh; else None (fetch extracts itself)."""
     try:
         if path and time.time() - os.path.getmtime(path) < INFO_MAX_S:
             with open(path) as f:
                 info = json.load(f)
             # a followed redirect keeps the asked id in original_url
-            if (info.get('id') == vid or (info.get('original_url') or '').endswith('=' + vid)) and usable(info):
+            if (info.get('id') == vid or (info.get('original_url') or '').endswith('=' + vid)) and usable(info, avc1):
                 return info
     except (OSError, ValueError, AttributeError):
         pass
@@ -980,8 +1152,8 @@ def fetch(a):
 
     ya = yt_dlp.YoutubeDL(dict(ydl_params(a, AUDIO_FMT, audio_hook),
                                outtmpl={'default': os.path.join(a.dir, 'audio.src.%(ext)s')}))
-    yv = yt_dlp.YoutubeDL(dict(ydl_params(a, video_fmt(a.height)), outtmpl={'default': '-'}))
-    info = load_info(a.info, a.id)
+    yv = yt_dlp.YoutubeDL(dict(ydl_params(a, video_fmt(a.height, not a.avc1)), outtmpl={'default': '-'}))
+    info = load_info(a.info, a.id, a.avc1)
     try:
         info = info or extract(yt_dlp, a, url)
     except Exception as e:  # noqa: BLE001 - any yt-dlp failure is reported to the daemon
@@ -994,7 +1166,7 @@ def fetch(a):
         json.dump(meta, f)
     os.replace(os.path.join(a.dir, 'meta.json.tmp'), os.path.join(a.dir, 'meta.json'))
     emit(ev='meta', title=meta['title'], duration_s=meta['duration_s'], chapters=meta['chapters'])
-    why = unplayable(info)
+    why = unplayable(info, a.avc1)
     if why:
         fail(why)
     # the tags the car's player shows (title, channel, the thumbnail as cover): the cover fetched alongside, so
@@ -1055,11 +1227,14 @@ def fetch(a):
             emit(ev='video', ms=ms, frames=frames, bytes=nbytes,
                  pct=min(100, round(ms * 100 / dur_ms)) if dur_ms else 0)
 
+    webm = False
     try:
         with os.fdopen(rfd, 'rb') as f:
-            frames, nbytes, ms = demux_video(f, a.dir, meta['duration_s'], vprog)
+            webm = f.peek(1)[:1] == EBML_MAGIC
+            frames, nbytes, ms = (demux_webm if webm else demux_video)(f, a.dir, meta['duration_s'], vprog)
     except Exception as e:  # noqa: BLE001
-        fail(f'video: {yv.params["logger"].last or e}')
+        # a VP9 stream we cannot read: the daemon fetches again with --avc1 (a network error is not that)
+        fail(f'vp9: {e}' if webm and not isinstance(e, OSError) else f'video: {yv.params["logger"].last or e}')
     emit(ev='video', ms=ms, frames=frames, bytes=nbytes, pct=100)
     tv.join()
     ta.join()
@@ -1135,7 +1310,7 @@ def check(a):
     os.makedirs(out)
     cmd = [sys.executable, '-I', os.path.abspath(__file__), 'fetch', vid, out, '--cache-dir', cache,
            '--height', str(a.height), '--node', a.node, '--lease', a.lease] + (['--pyz', a.pyz] if a.pyz else []) + \
-        ([] if cert_time else ['--no-cert-time'])
+        ([] if cert_time else ['--no-cert-time']) + (['--avc1'] if a.avc1 else [])
     t = time.monotonic()
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, env={}, cwd='/')
     t_audio = t_head = t_lead = t_dl = None  # t_dl: first progress event, after yt-dlp's 'sleep as required by the site'
@@ -1458,7 +1633,7 @@ def validate(index_path, h264_path):
     """mgyi.validate's rules; returns the record count."""
     with open(index_path, 'rb') as f:
         data = f.read()
-    magic, ver, _w, _h, _fn, _fd, n = HDR.unpack_from(data)
+    magic, ver, _w, _h, _fn, _fd, n, _codec = HDR.unpack_from(data)
     assert magic == b'MGYI' and ver == 1, 'bad header'
     assert len(data) == HDR.size + n * REC.size, 'bad length'
     recs = [REC.unpack_from(data, HDR.size + i * REC.size) for i in range(n)]
@@ -1480,6 +1655,7 @@ def main(argv=None):
     ap.add_argument('--pyz')
     ap.add_argument('--uid', type=int)
     ap.add_argument('--info')
+    ap.add_argument('--avc1', action='store_true', help='fetch: H.264 only (no VP9)')
     ap.add_argument('--json', action='store_true', help='check: the health probes only, as JSON lines')
     ap.add_argument('--no-cert-time', action='store_true', help="TLS: skip only the certificate's validity dates")
     ap.add_argument('--releases')

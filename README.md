@@ -32,9 +32,13 @@ the car, over the car's own internet connection:
 - The sound plays through the car's own media player.
 - While driving, the picture is replaced by a podcast view (title, progress, controls) and the sound plays on.
   The picture comes back when the car is parked again.
-- Nothing is stored for later. The video playing is downloaded to the head unit in full while it plays, then
-  deleted: expect the video's whole size on your data plan, even if you stop early. The download stops if the
-  head unit's storage gets low.
+- The video playing is downloaded to the head unit in full while it plays, then deleted: expect the video's whole
+  size on your data plan, even if you stop early. The download stops if the head unit's storage gets low.
+- **Download** in the player keeps a video on the car until you remove it (press **Downloaded**). Downloads play
+  with no internet, from **Library** on the rail or **On this car** on Home, signed in or not. One downloads at a
+  time, never while a video plays, and only with at least 4 GB free on the head unit.
+- A setting can download the 3, 5 or 10 newest Subscriptions videos by itself, only on Wi-Fi and only signed in.
+  It is off by default. Those videos go once watched.
 - Signed in, what you watch goes to your YouTube history, as on a TV.
 - **Send logs to the developer** (in the menu, and on the error screen when a video fails) sends RideTube's
   recent service log and the health check result once, after you confirm, with the account details and the

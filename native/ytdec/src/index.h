@@ -1,7 +1,9 @@
 /* MGYI frame index (yt/proxy/mgyi.py): a 32-byte header ("MGYI", u16
- * version 1, u16 w, h, fps_num, fps_den, u32 frame count at offset 16), then
- * 17-byte little-endian records in decoding order: u32 pts_ms, u64 pos,
- * u32 size, u8 key. The file may grow while it is read (refresh()). */
+ * version 1, u16 w, h, fps_num, fps_den, u32 frame count at offset 16, u32
+ * codec at offset 20: 0 = H.264 Annex-B, "VP9 " = MFX_CODEC_VP9, raw VP9
+ * frames; the rest zero), then 17-byte little-endian records in decoding
+ * order: u32 pts_ms, u64 pos, u32 size, u8 key. The file may grow while it is
+ * read (refresh()). */
 #ifndef YTDEC_INDEX_H
 #define YTDEC_INDEX_H
 
@@ -29,12 +31,14 @@ public:
     bool is_open() const { return fd_ >= 0; }
 
     uint16_t w = 0, h = 0, fps_num = 0, fps_den = 0;
+    uint32_t codec = 0;   /* 0 H.264, else an MSDK CodecId fourcc */
     std::vector<IndexRec> recs;
 
     /* The last record in decoding order with pts <= ms that a decoder can
      * start from after a reset: a keyframe whose access unit carries an SPS
      * (h264_mp4toannexb puts SPS/PPS before every IDR). video_fd: the
-     * Annex-B file, to look at the access unit's NAL types. 0 if none. */
+     * Annex-B file, to look at the access unit's NAL types. 0 if none.
+     * VP9 (codec set): any keyframe; it carries its own sequence header. */
     size_t seek_point(uint32_t ms, int video_fd);
 
 private:

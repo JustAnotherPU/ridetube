@@ -69,10 +69,10 @@ STUBS = $(T)/stub/libmfxhw64.so $(T)/stub/libva.so.1 $(T)/stub/libva-drm.so.1
 $(T)/ytdec: $(SRC) $(HDR) $(STUBS)
 	mkdir -p $(@D)
 	g++ $(CXXFLAGS) $(CPPFLAGS) -DNDEBUG -DYTDEC_VERSION='"$(VERSION)"' -pthread \
-		-Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2 -o $@ $(SRC) $(STUBS)
+		-Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2 -o $@ $(SRC) $(STUBS) -ldl
 	$(PYTHON) tools/abi.py check $@ abi/libvsomeip3.so.3.symbols   # loader, glibc/libstdc++ limits
-	$(PYTHON) tools/woc_abi.py check-imports $@ --prefix MFX va -- \
-		abi/libmfx.symbols abi/libva.symbols abi/libva-drm.symbols
+	$(PYTHON) tools/woc_abi.py check-imports $@ --prefix MFX va dl -- \
+		abi/libmfx.symbols abi/libva.symbols abi/libva-drm.symbols abi/libdl.symbols
 
 clean:
 	rm -rf $(BUILD)

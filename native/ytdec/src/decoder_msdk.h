@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Robert Nisipeanu
-// Modified 2026-11 by JustAnotherPU for RideTube (GPL-3.0 section 5(a)): frames in display order with their timestamps, VPP fit/fill into the output size, NV12 planes out.
+// Modified 2026-11 by JustAnotherPU for RideTube (GPL-3.0 section 5(a)): frames in display order with their timestamps, VPP fit/fill into the output size, NV12 planes out, VP9 through the unit's MSDK VP9 plugin.
 // From github.com/robertnisipeanu/idrive-apps, native/waze-on-cluster/src/decoder_msdk.h.
 /* Hardware H.264 decoder: Annex-B byte stream in, NV12 frames out.
  *
@@ -56,7 +56,8 @@
  * DecodedOrder as the software library does, whether the phone's stream has
  * B frames, and throughput. The decoder has never run on the GPU. Frames
  * without a picture (decode synced alone, no VPP) are checked against
- * neither library. */
+ * neither library. VP9 (use_vp9) is checked against neither: the unit's
+ * libmfxsw64 has no VP9 and there is no software VP9 plugin. */
 #ifndef WOC_DECODER_MSDK_H
 #define WOC_DECODER_MSDK_H
 
@@ -112,6 +113,14 @@ public:
     /* Initialised and holding a sequence: false before the first SPS and
      * after a sequence was given up, until the next SPS. */
     bool decoding() const;
+
+    /* VP9 instead of H.264, from now on: loads the unit's VP9 plugin
+     * (/usr/lib/mediasdk/libmfx_vp9d_hw64.so) and registers it in every
+     * session, as the MSDK dispatcher's MFXVideoUSER_Load does. Then each
+     * feed() is one whole VP9 frame (a superframe whole) with end_of_au, a
+     * keyframe starts a sequence (the SPS's role), no NAL framing. False,
+     * with *err, when the plugin does not load or register. */
+    bool use_vp9(std::string *err);
 
 private:
     struct State;

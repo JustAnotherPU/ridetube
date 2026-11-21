@@ -42,6 +42,7 @@ bool Index::open(const std::string &path, std::string *err)
         return false;
     }
     w = le16(h + 6), this->h = le16(h + 8), fps_num = le16(h + 10), fps_den = le16(h + 12);
+    codec = le32(h + 20);
     fd_ = fd;
     refresh();
     return true;
@@ -87,6 +88,8 @@ size_t Index::seek_point(uint32_t ms, int video_fd)
         const IndexRec &r = recs[i];
         if (!r.key || r.pts_ms > ms)
             continue;
+        if (codec)
+            return i;
         if (clean_[i] < 0) {
             /* SPS/PPS/SEI come first in the access unit; 64 KiB covers them. */
             std::vector<uint8_t> b(r.size < 65536 ? r.size : 65536);

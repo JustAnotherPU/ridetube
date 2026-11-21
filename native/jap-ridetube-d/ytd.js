@@ -6,6 +6,7 @@
 // lines; README.md has the protocol). Node 8: no ?. / ?? / catch without binding.
 // 0.1.6: feed{which, items, shelves:[{title, items}]}, items carry meta (the tile's second line).
 // The car fetches (ytfetch.py), searches (InnerTube) and makes thumbs (thumb.js) itself, all as the fetch uid; playback starts while the video is still being fetched.
+// 0.5.0: downloads (library / download / remove, cache/saved/<id>): kept until removed, played with no network.
 // It never exits on its own: a stray exception is logged, audio is released, it goes idle.
 const fs = require('fs');
 const path = require('path');
@@ -16,6 +17,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
+const isVid = (id) => typeof id === 'string' && ID_RE.test(id);   // (String(['x...']) would pass ID_RE, then break path.join)
 const SOURCE_ID = 1046, SINK_ID = 1024;
 const MEDIA_FILES = ['audio.m4a', 'index.bin', 'video.h264'];
 // a video's folder: BMW's media engine (its own uid, no capabilities) opens audio.m4a in it, so it must be able to
@@ -23,13 +25,13 @@ const MEDIA_FILES = ['audio.m4a', 'index.bin', 'video.h264'];
 const VIDEO_DIR_MODE = 0o711;
 // thumb.rgba length -> [w, h]: 160x90 in caches from older proxies, 320x180 since 0.1.6
 const THUMB_SIZES = { 57600: [160, 90], 230400: [320, 180] };
-const VERSION = '0.4.8';   // component.json's (test_ytd.js checks): sent with a log report
+const VERSION = '0.5.0';   // component.json's (test_ytd.js checks): sent with a log report
 // the day this build was released (UTC), bumped with VERSION at each release (tools/release.py refuses one in the
 // future). A head unit clock before it is provably wrong: only then does TLS skip the certificate dates (certTime)
 const BUILT = '2026-11-21';
 // what `hello` says this build answers for real. The frozen names: health, related, hist (feed hist|liked), ytdlp,
-// remote, proxy, stream. A package adds its name here (through the integrator) once its command works
-const CAPS = ['related', 'hist', 'health', 'remote', 'ytdlp'];
+// remote, proxy, stream, download (library, download, remove, auto_download). A package adds its name here (through the integrator) once its command works
+const CAPS = ['related', 'hist', 'health', 'remote', 'ytdlp', 'download'];
 const LANG_RE = /^[a-z]{2}$/, REGION_RE = /^[A-Z]{2}$/;   // hello's lang ("ru") and region ("RU")
 // the log relay (send_logs posts <REPORT_URL>/v1/report): the only place reports go. MGU_YT_REPORT_URL or opts.reportUrl override it
 const REPORT_URL = 'https://ridetube-logs.ridetube-relay.workers.dev';
@@ -70,6 +72,7 @@ function defaults() {
         thumbCmd: ['/var/opt/jap-node22/current/bin/node', path.join(here, 'thumb.js')],
         startVideoMs: 6000,  // video fetched ahead before playback starts (later the buffering pause covers a slow link)
         fetchRetryMs: [3000, 8000], // a fetch failing before playback (the network): tried again after these waits
+        h264Only: env.MGU_YT_H264 === '1', // internal escape hatch: never VP9 (ytfetch.py --avc1)
         spare: true,         // keep a ytfetch.py serve (yt-dlp loaded) waiting while the app is in use
         warmMs: 600000,      // ... for this long after the app's last command
         infoMaxMs: 1500000,
@@ -87,7 +90,15 @@ function defaults() {
         underrunWaitMs: 500, // the player ran dry (underrun): started again at the clock after this
         thumbMax: 150,
         ytTimeoutMs: 10000,
-        keep: 0,             // played videos kept in the cache (0: deleted once played; nothing is kept for offline)
+        keep: 0,             // played videos kept in the cache besides the downloads (0: deleted once played)
+        minFreeMb: 4096,
+        dlStopFreeMb: 1024,  // a download under way stops below this much free (it starts again from scratch with minFreeMb)     // a download starts only with this much free where the cache is (/var/opt, shared with the Store)
+        freeMb: null,        // (tests) dir -> MB free; null: df
+        heldStopMs: 3000,    // paused but the player plays on: STOP again at most this often, then release the audio
+        dlNetWaitMs: 60000,  // a download failing for the network (not counted): the queue waits this long
+        dlTries: 3,          // a download failing this often (network, not the video) is given up until it is asked again
+        autoEveryMs: 1800000, // auto-downloads: Subscriptions looked at this often, on Wi-Fi only
+        autoMaxS: 3600,      // ... and longer videos left out
         watchdogMs: 5000,
         tickMs: 5000,
         availWaitMs: 5000,
@@ -112,7 +123,10 @@ const isMembers = (t) => /BADGE_STYLE_TYPE_MEMBERS|"Members (only|first)"/i.test
 // shortcut: the values are YouTube's live enums from its other clients, no TVHTML5 live capture in test/; check on the first one
 const LIVE_VALUES = ['LIVE', 'UPCOMING', 'THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE', 'BADGE_STYLE_TYPE_LIVE_NOW'];
 const isLive = (marks, duration) => duration === null && marks.some((x) => LIVE_VALUES.indexOf(x) >= 0);
-const PERMANENT_RE = /unavailable|private|removed|terminated|copyright|members|age|confirm your age|not available in your country|can't be played|can't play|head unit clock|blocking this connection/i;   // the last: ytfetch.py BOT_MSG, no retry nor yt-dlp update
+// \bage\b: "confirm your age", "age-restricted"; never yt-dlp's "Unable to download API page / webpage" (the network)
+const PERMANENT_RE = /unavailable|private|removed|terminated|copyright|members|\bage\b|not available in your country|can't be played|can't play|head unit clock|blocking this connection/i;   // the last: ytfetch.py BOT_MSG, no retry nor yt-dlp update
+// a fetch that failed for the network (the car offline), not for the video
+const NET_RE = /internet uid|name resolution|resolve|getaddrinfo|EAI_AGAIN|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED|ECONNRESET|ETIMEDOUT|timed out|unreachable|No route to host|Connection refused|urlopen error|offline/i;
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 function withTimeout(p, ms, what) {
     return new Promise(function (resolve, reject) {
@@ -138,7 +152,22 @@ function mkdirp(p) {
     fs.mkdirSync(p, 0o755);
 }
 
-// ---------------------------------------------------------------- playback cache (no downloads: a played video goes)
+// ---------------------------------------------------------------- playback cache (a played video goes, a download stays)
+// the downloads asked for: cache/saved/<id> (root's, 0700), a JSON marker {title, channel, duration_s, height, at, auto?,
+// failed?}; the files are the video's folder as a play leaves it. Kept until removed: prune and the thumbs' cap skip them
+const SAVED_DIR = 'saved';
+// null when saved/ is there but cannot be read: the cleanups then delete nothing (none would be known as a download)
+function savedIds(cacheDir) {
+    try { return fs.readdirSync(path.join(cacheDir, SAVED_DIR)).filter((n) => ID_RE.test(n)); } catch (e) { return e.code === 'ENOENT' ? [] : null; }
+}
+// MB free in dir's file system (Node 8 has no statfs: df -Pk), null when it cannot be read
+function freeMb(dir) {
+    try {
+        const l = cp.execFileSync('df', ['-Pk', dir], { encoding: 'utf8', timeout: 3000 }).trim().split('\n').pop().trim().split(/\s+/);
+        const kb = Number(l[l.length - 3]);
+        return kb >= 0 ? Math.floor(kb / 1024) : null;
+    } catch (e) { return null; }
+}
 // a file in a folder the fetch uid owns, read by root: no symlink (last component), only a regular file (a FIFO would
 // block root, a device feed it forever), ok(size) true; read from that fd. null on anything else (treated as missing)
 function readFetchFile(f, ok) {
@@ -198,13 +227,15 @@ function listCache(cacheDir) {
 }
 // SponsorBlock answers, cache/.sb/<id>.json: root's (0700), never in a video's folder, which the fetch uid owns
 const SB_DIR = '.sb';
-// Keep the `keep` most recent ids (dir mtime); never the protected ones (playing/preparing). rm: how a folder
-// goes (the daemon's rmTree; rmrf by default). .sb/<id>.json (SponsorBlock, root's) goes with its video's folder.
-function pruneCache(cacheDir, keep, protect, log, rm) {
+// Keep the `keep` most recent ids (dir mtime); never the protected ones (playing/preparing) nor the saved ones (downloads,
+// not counted in keep). rm: how a folder goes (the daemon's rmTree; rmrf by default). .sb/<id>.json (SponsorBlock, root's)
+// goes with its video's folder.
+function pruneCache(cacheDir, keep, protect, log, rm, saved) {
     const items = listCache(cacheDir);
     const removed = [];
     let kept = 0;
     items.forEach(function (it) {
+        if (saved && saved.indexOf(it.id) >= 0) return;
         if (protect.indexOf(it.id) >= 0) { kept++; return; }
         if (kept < keep) { kept++; return; }
         try { (rm || rmrf)(path.join(cacheDir, it.id)); removed.push(it.id); } catch (e) { log('lru: ' + it.id + ': ' + e.message); }
@@ -1206,9 +1237,14 @@ Audio.prototype.seek = function (ms) {
 // Every exit path ends here. Safe to call twice.
 Audio.prototype.release = async function () {
     if (this.pending) await this.pending;
+    if (this.releasing) await this.releasing;   // one under way (a paused player that plays on): its disconnect first
     if (this.connId === null) return;
     const id = this.connId;
     this.connId = null;
+    const p = this.releasing = this.disconnect(id);
+    try { await p; } finally { if (this.releasing === p) this.releasing = null; }
+};
+Audio.prototype.disconnect = async function (id) {
     await this.button('STOP');
     try {
         if (id === -1) throw new Error('no connection id');
@@ -1304,6 +1340,11 @@ function Daemon(o) {
     this.client = null;
     this.child = null;
     this.deaths = 0;
+    // VP9 failed on this car (ytdec exit 4, or a VP9 stream ytfetch could not read): kept in state/codec.json (setAvc1),
+    // so later starts go straight to H.264 (deleting the file tries VP9 again)
+    const codec = readJson(path.join(this.opts.stateDir, 'codec.json'));
+    this.avc1Only = !!this.opts.h264Only || !!(codec && codec.avc1 === true);
+    this.codecRetry = null; // the video last fetched again as H.264 after ytdec's exit 4 (once a video)
     this.videoOn = true;
     this.paused = false;
     this.elapsed = 0;
@@ -1427,7 +1468,7 @@ Daemon.prototype.positions = function () {
 };
 Daemon.prototype.savePos = function (force) {
     const c = this.cur;
-    if (!c || !this.total || this.head && !c.durationMs) return;
+    if (!c || !this.total || (this.head || this.headFile) && !c.durationMs) return;   // (the head's own ~60 s total is no length)
     if (!force && Date.now() - (this.posAt || 0) < 15000) return;
     this.posAt = Date.now();
     const p = this.positions(), m = readMeta(c.dir, c.id);
@@ -1672,6 +1713,7 @@ Daemon.prototype.start = async function () {
     this.timers.push(setInterval(() => this.guard(() => this.lockSocket()), this.opts.tickMs));   // a reinstall can change the app's uid
     this.ytdlpNext = Date.now() + this.opts.ytdlpFirstMs;
     this.timers.push(setInterval(() => this.guard(() => this.ytdlpTick()), this.opts.tickMs));
+    this.timers.push(setInterval(() => this.guard(() => this.downloadTick()), this.opts.tickMs));
     this.keepWarm();
     this.prune();
     // The SOME/IP services may come up after us at boot: retry until the leftover check ran (logged when the reason changes)
@@ -1891,6 +1933,10 @@ Daemon.prototype.onLine = function (line) {
     case 'related': return this.related(m.id);
     case 'remote': return this.remote(m.on, m.lang);   // 0.4.1
     case 'proxy': return this.proxy(m.mode);   // later
+    case 'library': return this.sendLibrary();   // 0.5.0
+    case 'download': return this.download(m.id, m.meta, m.quality);
+    case 'remove': return this.remove(m.id);
+    case 'auto_download': return this.setAutoMax(m.max);
     default: return this.emit({ ev: 'error', msg: 'unknown cmd ' + m.cmd });
     }
 };
@@ -1975,7 +2021,268 @@ Daemon.prototype.prune = function () {
     const protect = [];
     if (this.cur) protect.push(this.cur.id);
     if (this.preparing) protect.push(this.preparing);
-    return pruneCache(this.opts.cacheDir, this.opts.keep, protect, this.log, (p) => this.rmTree(p));
+    if (this.dl) protect.push(this.dl.id);
+    if (this.dlStopping) protect.push(this.dlStopping.id);   // stopped, its fetcher not gone yet: still writing there
+    const saved = savedIds(this.opts.cacheDir);
+    if (!saved) { this.log('lru: the downloads cannot be read, nothing removed'); return []; }
+    return pruneCache(this.opts.cacheDir, this.opts.keep, protect, this.log, (p) => this.rmTree(p), saved);
+};
+// ---- downloads (0.5.0): `download` {id, meta: {title, channel, duration_s}, quality} queues id (a saved/<id> marker),
+// `remove` {id} forgets it and deletes its files, `library` -> library{items: [{id, title, channel, duration_s, ready, pct?,
+// error?: 'download failed' | 'not enough space', auto?}]}, newest first, also sent on every change. One at a time, as the
+// fetch uid into the video's folder as a play fetches it, only with minFreeMb free, never while a play starts, plays or is
+// paused: playing always wins (play() stops it; it starts again from scratch later). A cut one (a reboot, a failure) is
+// never counted: ready needs every file and no .part (ytfetch.py renames each file once complete). A downloaded video
+// plays from its files (play() fetches nothing for a playable folder), so with no network too.
+Daemon.prototype.savedFile = function (id) { return path.join(this.opts.cacheDir, SAVED_DIR, id); };
+Daemon.prototype.savedMeta = function (id) { const m = readJson(this.savedFile(id)); return m && typeof m === 'object' ? m : null; };
+// a download: its marker is there (one that cannot be read too: its files are kept, its failures counted)
+Daemon.prototype.isSaved = function (id) { return fs.existsSync(this.savedFile(id)); };
+Daemon.prototype.writeSaved = function (id, m) {
+    const sd = path.join(this.opts.cacheDir, SAVED_DIR), f = this.savedFile(id);
+    if (!fs.existsSync(sd)) fs.mkdirSync(sd, 0o700);   // root's, in root's cache/: the fetch uid never reaches a marker
+    fs.writeFileSync(f + '.tmp', JSON.stringify(m), { mode: 0o600 });
+    fs.renameSync(f + '.tmp', f);
+};
+// the markers as {id, ...}, newest asked first
+Daemon.prototype.saved = function () {
+    return (savedIds(this.opts.cacheDir) || []).map((id) => Object.assign({}, this.savedMeta(id), { id: id })).sort((a, b) => (b.at || 0) - (a.at || 0));
+};
+Daemon.prototype.libraryItems = function () {
+    return this.saved().map((m) => {
+        const ready = isReady(path.join(this.opts.cacheDir, m.id));
+        const o = { id: m.id, title: String(m.title || m.id), channel: String(m.channel || ''), duration_s: m.duration_s > 0 ? m.duration_s : null, ready: ready };
+        if (m.auto) o.auto = true;
+        if (!ready && m.failed) o.error = 'download failed';
+        else if (!ready && this.dl && this.dl.id === m.id) o.pct = this.dl.pct;
+        else if (!ready && this.dlFull) o.error = 'not enough space';
+        return o;
+    });
+};
+Daemon.prototype.sendLibrary = function () {
+    const items = this.libraryItems();
+    this.libSig = JSON.stringify(items);
+    return this.emit({ ev: 'library', items: items });
+};
+// the tick: the auto-downloads, the queue, and the library again when it changed (a play's own fetch completing one)
+Daemon.prototype.downloadTick = function () {
+    this.autoExpire();
+    if (this.dl) {   // the space while one downloads: under dlStopFreeMb it stops (an unreadable df lets it go on)
+        const free = this.opts.freeMb ? this.opts.freeMb(this.opts.cacheDir) : freeMb(this.opts.cacheDir);
+        if (free !== null && free < this.opts.dlStopFreeMb) {
+            this.log('download ' + this.dl.id + ': ' + free + ' MB free, under ' + this.opts.dlStopFreeMb + ' - stopped');
+            this.dlFull = true;
+            this.dlFullAt = Date.now();
+            this.stopDownload();   // (its close handler removes the cut files and says not enough space)
+        }
+    }
+    this.autoTick().catch((e) => { this.autoBusy = false; this.log('auto-download: ' + e.message); });
+    this.pumpDownload();
+    if (this.client && JSON.stringify(this.libraryItems()) !== this.libSig) this.sendLibrary();
+};
+Daemon.prototype.download = function (id, meta, quality) {
+    if (!isVid(id)) return this.emit({ ev: 'error', msg: 'bad id' });
+    const m = meta && typeof meta === 'object' ? meta : {}, was = this.savedMeta(id) || {}, f = readMeta(path.join(this.opts.cacheDir, id), id);
+    const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+    try {   // asked by hand: no longer an auto one, nor a failed one
+        this.writeSaved(id, { title: (f.title !== id && f.title) || str(m.title, 300) || was.title || id, channel: f.channel || str(m.channel, 200) || was.channel || '',
+            duration_s: f.duration_s || (Number(m.duration_s) > 0 ? Math.round(Number(m.duration_s)) : null) || was.duration_s || null,
+            height: qualityHeight(quality, readJson(this.opts.leaseFile)), at: Date.now() });
+    } catch (e) { this.log('download ' + id + ': ' + e.message); return this.sendLibrary(); }
+    (this.dlFails || (this.dlFails = {}))[id] = 0;
+    this.log('download asked: ' + id);
+    this.thumbData(id).catch((e) => this.log('thumb ' + id + ': ' + e.message));   // kept for the library, offline
+    this.sendLibrary();
+    this.pumpDownload();
+    return undefined;
+};
+Daemon.prototype.remove = async function (id) {
+    if (!isVid(id)) return this.emit({ ev: 'error', msg: 'bad id' });
+    const was = this.savedMeta(id);
+    if (was && was.auto) (this.autoBad || (this.autoBad = {}))[id] = true;   // not brought back by the next Subscriptions look
+    try { fs.unlinkSync(this.savedFile(id)); } catch (e) { /* not saved */ }
+    try { fs.unlinkSync(path.join(this.opts.cacheDir, 'thumbs', id + '.rgba')); } catch (e) { /* none */ }
+    this.log('download removed: ' + id);
+    if (this.dl && this.dl.id === id) await this.stopDownload();
+    if (!(this.cur && this.cur.id === id) && this.preparing !== id && !this.isSaved(id)) {   // its files go (the one playing: once it stops)
+        try { this.rmTree(path.join(this.opts.cacheDir, id)); } catch (e) { this.log('download ' + id + ': ' + e.message); }
+    }
+    this.prune();
+    this.sendLibrary();
+    this.pumpDownload();
+    return undefined;
+};
+// the oldest asked download not on the car yet, when nothing plays or starts and there is room
+Daemon.prototype.pumpDownload = function () {
+    if (this.closed || this.dl || this.dlStopping || this.fetcher || this.preparing || this.restart || ['preparing', 'playing', 'paused'].indexOf(this.state) >= 0) return undefined;
+    // (dlStopping: its close handler pumps once the fetcher is gone, never an rm -rf under it)
+    // offline (no lease) none starts: every one would fail for the network; after a network failure, a minute's wait
+    const lease = readJson(this.opts.leaseFile);
+    if (!lease || Date.now() < (this.dlNetAt || 0)) return undefined;
+    const wifi = /^wlan/.test(String(lease.interface));   // the auto ones on Wi-Fi only, as autoTick picks them
+    const fails = this.dlFails || (this.dlFails = {}), cache = this.opts.cacheDir;
+    const next = this.saved().reverse().find((m) => !m.failed && (wifi || !m.auto) && (fails[m.id] || 0) < this.opts.dlTries && !isReady(path.join(cache, m.id)));
+    if (!next) { this.dlFull = false; return undefined; }
+    const id = next.id, dir = path.join(cache, id);
+    const failed = (e) => {
+        fails[id] = (fails[id] || 0) + 1;
+        this.log('download ' + id + ': ' + e.message + ' (' + fails[id] + '/' + this.opts.dlTries + ')');
+        return this.sendLibrary();
+    };
+    // a cut download's leftovers go first (also while waiting for space: they take it): from scratch, ytfetch.py cannot
+    // go on from a .part
+    try { this.rmTree(dir); } catch (e) { return failed(e); }
+    if (this.dlFull && Date.now() - this.dlFullAt < 60000) return undefined;   // (df once a minute while full)
+    const free = this.opts.freeMb ? this.opts.freeMb(cache) : freeMb(cache);
+    if (!(free >= this.opts.minFreeMb)) {   // unreadable: no start either (the eMMC is shared with the Store and the car's tools)
+        this.dlFullAt = Date.now();
+        if (!this.dlFull) { this.dlFull = true; this.log('download ' + next.id + ': ' + free + ' MB free, under ' + this.opts.minFreeMb + ' - waiting'); this.sendLibrary(); }
+        return undefined;
+    }
+    this.dlFull = false;
+    let child;
+    try {
+        mkdirp(dir);
+        fs.chmodSync(dir, VIDEO_DIR_MODE);
+        this.chownFetch(dir);
+        child = this.spawnJob(['fetch', '--cache-dir', this.ytc(), '--height', String(next.height || 720)].concat(this.avc1Only ? ['--avc1'] : [], this.pyzArgs(), ['--', id, dir]));
+    } catch (e) {
+        return failed(e);
+    }
+    const d = this.dl = { id: id, child: child, pct: 0, stopped: false };
+    this.log('download ' + id + ': started');
+    let err = null, sentPct = 0;
+    readline.createInterface({ input: child.stdout }).on('line', (l) => this.guard(() => {
+        let e;
+        try { e = JSON.parse(l); } catch (x) { return; }
+        if (e.ev === 'error') {
+            err = String(e.msg);
+            if (/^vp9:/.test(err) && !this.avc1Only) { this.setAvc1(); this.log('download: ' + err + ' - H.264 only from now on'); }
+        } else if (e.ev === 'video' && Number(e.pct) >= 0 && this.dl === d) {
+            d.pct = Math.min(99, Math.round(Number(e.pct)));
+            if (d.pct - sentPct >= 5) { sentPct = d.pct; this.sendLibrary(); }
+        }
+    }));
+    readline.createInterface({ input: child.stderr }).on('line', (l) => this.log('ytfetch (download): ' + l));
+    child.on('error', (e) => { err = err || e.message; });
+    child.on('close', (code, sig) => this.guard(() => {
+        if (this.dl === d) this.dl = null;
+        const saved = this.isSaved(id), m = this.savedMeta(id) || {};
+        if (isReady(dir)) {
+            this.log('download ' + id + ': done');
+            const f = readMeta(dir, id);
+            if (saved) { try { this.writeSaved(id, Object.assign(m, { title: f.title !== id ? f.title : m.title, channel: f.channel || m.channel, duration_s: f.duration_s || m.duration_s })); } catch (e) { this.log('download ' + id + ': ' + e.message); } }
+            this.thumbData(id).catch((e) => this.log('thumb ' + id + ': ' + e.message));
+        } else if (!d.stopped && saved && NET_RE.test(err || '')) {   // the network, not the video: not counted
+            this.dlNetAt = Date.now() + this.opts.dlNetWaitMs;
+            this.log('download ' + id + ': ' + err + ' - the network, again in ' + Math.round(this.opts.dlNetWaitMs / 1000) + ' s');
+        } else if (!d.stopped && saved) {
+            fails[id] = (fails[id] || 0) + 1;
+            const why = err || (sig ? 'killed ' + sig : 'exit ' + code), last = PERMANENT_RE.test(why) || fails[id] >= this.opts.dlTries;
+            this.log('download ' + id + ': ' + why + ' (' + fails[id] + '/' + this.opts.dlTries + ')' + (last ? ', given up' : ''));
+            if (last) {   // kept as failed (asked again by hand: tried again), so a reboot does not retry it; an auto one goes
+                try {
+                    if (m.auto) { (this.autoBad || (this.autoBad = {}))[id] = true; fs.unlinkSync(this.savedFile(id)); } else this.writeSaved(id, Object.assign(m, { failed: true }));
+                } catch (e) { this.log('download ' + id + ': ' + e.message); }
+                if (!(this.cur && this.cur.id === id) && this.preparing !== id) { try { this.rmTree(dir); } catch (e) { this.log('download ' + id + ': ' + e.message); } }
+            }
+        }
+        if (!saved) this.prune();   // no longer asked (an auto one gone meanwhile): its files go, now that the fetcher has
+        this.sendLibrary();
+        this.pumpDownload();
+    }));
+    this.sendLibrary();
+    return undefined;
+};
+// a play starts, or the download was removed: the fetcher goes (SIGTERM, SIGKILL after 3 s); resolves once it is gone
+Daemon.prototype.stopDownload = function () {
+    const d = this.dl;
+    if (!d) return Promise.resolve();
+    this.dl = null;
+    d.stopped = true;
+    this.dlStopping = d;   // prune keeps its folder until the fetcher is gone
+    this.log('download ' + d.id + ': stopped');
+    return new Promise((resolve) => {
+        const gone = () => { clearTimeout(t); if (this.dlStopping === d) this.dlStopping = null; resolve(); };
+        const t = setTimeout(() => { try { d.child.kill('SIGKILL'); } catch (e) { /* gone */ } }, 3000);
+        d.child.on('exit', gone);
+        if (d.child.exitCode !== null || d.child.signalCode !== null) gone();
+        try { d.child.kill('SIGTERM'); } catch (e) { /* gone */ }
+    });
+};
+// ---- auto-downloads (the app's setting `auto_download` {max}, kept in state/autodl.json; absent: off): the max newest
+// Subscriptions videos not watched to the end (no Shorts, live or members-only, up to autoMaxS long), looked for every
+// autoEveryMs while signed in and on Wi-Fi (the uplink's wlan*: never on phone data, never with no lease). Their markers
+// carry auto: true; one goes once watched, or when newer videos push it out, or when the setting goes down
+Daemon.prototype.autoMax = function () {
+    if (this.autoN === undefined) { const s = readJson(path.join(this.opts.stateDir, 'autodl.json')); this.autoN = s && s.max > 0 && s.max <= 10 ? Math.floor(s.max) : 0; }
+    return this.autoN;
+};
+Daemon.prototype.setAutoMax = function (n) {
+    n = Number(n) > 0 && Number(n) <= 10 ? Math.floor(Number(n)) : 0;
+    if (n !== this.autoMax()) {
+        this.autoN = n;
+        this.autoAt = 0;   // looked for at the next tick
+        try {
+            if (!fs.existsSync(this.opts.stateDir)) { mkdirp(path.dirname(this.opts.stateDir)); fs.mkdirSync(this.opts.stateDir, 0o700); }
+            writeIfChanged(path.join(this.opts.stateDir, 'autodl.json'), JSON.stringify({ max: n }) + '\n', 0o644);
+        } catch (e) { this.log('auto-downloads: ' + e.message); }
+        this.log('auto-downloads: ' + (n ? 'the ' + n + ' newest' : 'off'));
+        if (this.autoExpire()) this.sendLibrary();
+    }
+    return this.emit({ ev: 'auto_download', max: n });
+};
+// the auto ones past the count (the newest kept) or watched to the end go, never the one playing; true when one went
+Daemon.prototype.autoExpire = function () {
+    const n = this.autoMax(), pos = this.positions();
+    let gone = 0;
+    this.saved().filter((m) => m.auto).forEach((m, i) => {
+        if ((i < n && !(pos[m.id] && pos[m.id].done)) || (this.cur && this.cur.id === m.id)) return;
+        try { fs.unlinkSync(this.savedFile(m.id)); gone++; } catch (e) { return; }
+        this.log('auto-download ' + m.id + ': ' + (i < n ? 'watched' : 'over the count'));
+        if (this.dl && this.dl.id === m.id) this.stopDownload();
+    });
+    if (gone) this.prune();
+    return gone > 0;
+};
+Daemon.prototype.autoTick = async function () {
+    const n = this.autoMax();
+    if (!n || this.autoBusy || Date.now() - (this.autoAt || 0) < this.opts.autoEveryMs) return;
+    const lease = readJson(this.opts.leaseFile);
+    if (!lease || !/^wlan/.test(String(lease.interface)) || this.account.status().state !== 'signed_in') return;
+    this.autoAt = Date.now();
+    this.autoBusy = true;
+    try {
+        const tok = await this.account.token(false);
+        let r = await this.account.browse(FEEDS.subs, tok);
+        if (r.status === 401) r = await this.account.browse(FEEDS.subs, await this.account.token(true));
+        if (r.status !== 200 || !r.j) { this.log('auto-download: Subscriptions ' + r.status); return; }
+        const items = feedItems(r.j);
+        if (!items.length) { this.log('auto-download: Subscriptions empty, nothing changed'); return; }   // (a bad answer must not drop them all)
+        const pos = this.positions(), bad = this.autoBad || {}, now = Date.now();
+        const want = items.filter((x) => !x.short && !x.live && !x.members && x.duration_s > 0 && x.duration_s <= this.opts.autoMaxS
+            && !(pos[x.id] && pos[x.id].done) && !bad[x.id]).slice(0, n);
+        const had = this.saved();
+        let changed = 0;
+        want.forEach((x, k) => {
+            const m = had.find((h) => h.id === x.id);
+            if (m && !m.auto) return;   // asked by hand: stays that
+            if (!m) changed++;
+            this.writeSaved(x.id, Object.assign(m || { title: x.title, channel: x.channel, duration_s: x.duration_s, height: qualityHeight(null, lease) },
+                { at: now - k, auto: true }));   // in the feed's order, newest first
+        });
+        const stops = [];
+        had.filter((m) => m.auto && !want.some((x) => x.id === m.id) && !(this.cur && this.cur.id === m.id)).forEach((m) => {
+            try { fs.unlinkSync(this.savedFile(m.id)); changed++; this.log('auto-download ' + m.id + ': no longer among the newest'); } catch (e) { /* gone */ }
+            if (this.dl && this.dl.id === m.id) stops.push(this.stopDownload());
+        });
+        await Promise.all(stops);   // its fetcher gone before the prune
+        if (!changed) return;
+        this.log('auto-download: ' + want.map((x) => x.id).join(' '));
+        this.prune();
+        this.sendLibrary();
+        this.pumpDownload();
+    } finally { this.autoBusy = false; }
 };
 // ---- send_logs {app}: the ring and ytdec.log's tail, redacted (redactLog), to the log relay as the fetch uid
 // -> logs_sent{id} (the code the user quotes) or logs_error{msg: closed|busy|offline|failed}. One at a time.
@@ -2000,6 +2307,7 @@ Daemon.prototype.known = function () {
     if (this.cur) { vid(this.cur.id); meta(this.cur); }
     [this.preparing, this.nextPrefetch, this.extracting && this.extracting.id].forEach(vid);
     listCache(this.opts.cacheDir).forEach((it) => { vid(it.id); meta(it); });
+    (savedIds(this.opts.cacheDir) || []).forEach((id) => { vid(id); meta(Object.assign({}, this.savedMeta(id), { id: id })); });   // auto-downloads never passed see()
     const pos = this.positions();
     Object.keys(pos).forEach((id) => { vid(id); meta(Object.assign({ id: id }, pos[id])); });
     list(path.join(this.opts.cacheDir, 'thumbs')).concat(list(path.join(this.opts.cacheDir, 'ytdlp', 'info'))).forEach((n) => vid(n.split('.')[0]));
@@ -2062,24 +2370,29 @@ Daemon.prototype.search = async function (q) {
     return this.emit({ ev: 'results', q: q, items: feedItems(r.j).slice(0, FEED_MAX) });
 };
 Daemon.prototype.thumb = async function (id) {
-    if (!ID_RE.test(String(id))) return this.emit({ ev: 'error', msg: 'bad id' });
-    const tdir = path.join(this.opts.cacheDir, 'thumbs'), tf = path.join(tdir, id + '.rgba');
-    const read = (f) => readFetchFile(f, (n) => !!THUMB_SIZES[n]);   // the video folder's is the fetch uid's
-    let data = read(path.join(this.opts.cacheDir, id, 'thumb.rgba')) || read(tf);
-    if (!data) {
-        // at most 3 helpers at once: each is a Node 22 process, and a page asks for 20 thumbs
-        const i = this.thumbN++ % this.thumbQ.length;
-        const p = this.thumbQ[i].then(() => this.thumbFetch(id));
-        this.thumbQ[i] = p.catch(() => {});
-        try { data = await p; } catch (e) {
-            this.log('thumb ' + id + ': ' + e.message);
-            return undefined; // no thumb: the app keeps its placeholder
-        }
-        try { mkdirp(tdir); fs.chmodSync(tdir, 0o700); fs.writeFileSync(tf, data, { mode: 0o600 }); this.pruneThumbs(tdir); } catch (e) { this.log('thumb cache: ' + e.message); }
+    if (!isVid(id)) return this.emit({ ev: 'error', msg: 'bad id' });
+    let data;
+    try { data = await this.thumbData(id); } catch (e) {
+        this.log('thumb ' + id + ': ' + e.message);
+        return undefined; // no thumb: the app keeps its placeholder
     }
     const wh = THUMB_SIZES[data.length];
     if (!wh) { this.log('thumb ' + id + ': ' + data.length + ' bytes, not 160x90 or 320x180 RGBA'); return undefined; }
     return this.emit({ ev: 'thumb', id: id, w: wh[0], h: wh[1], rgba: data.toString('base64') });
+};
+// id's thumb: the cached one, else fetched (thumb.js) and kept in thumbs/ (a download's stays there, offline too)
+Daemon.prototype.thumbData = async function (id) {
+    const tdir = path.join(this.opts.cacheDir, 'thumbs'), tf = path.join(tdir, id + '.rgba');
+    const read = (f) => readFetchFile(f, (n) => !!THUMB_SIZES[n]);   // the video folder's is the fetch uid's
+    let data = read(path.join(this.opts.cacheDir, id, 'thumb.rgba')) || read(tf);
+    if (data) return data;
+    // at most 3 helpers at once: each is a Node 22 process, and a page asks for 20 thumbs
+    const i = this.thumbN++ % this.thumbQ.length;
+    const p = this.thumbQ[i].then(() => this.thumbFetch(id));
+    this.thumbQ[i] = p.catch(() => {});
+    data = await p;
+    try { mkdirp(tdir); fs.chmodSync(tdir, 0o700); fs.writeFileSync(tf, data, { mode: 0o600 }); this.pruneThumbs(tdir); } catch (e) { this.log('thumb cache: ' + e.message); }
+    return data;
 };
 // thumb.js <id> as the fetch uid: exactly 320x180 RGBA on stdout, exit 0; killed after 10 s
 Daemon.prototype.thumbFetch = function (id) {
@@ -2098,9 +2411,9 @@ Daemon.prototype.thumbFetch = function (id) {
         });
     });
 };
-// thumbs/ keeps the newest thumbMax (mtime)
+// thumbs/ keeps the newest thumbMax (mtime), the downloads' besides
 Daemon.prototype.pruneThumbs = function (tdir) {
-    const names = list(tdir);
+    const saved = savedIds(this.opts.cacheDir), names = saved ? list(tdir).filter((n) => saved.indexOf(n.replace(/\.rgba$/, '')) < 0) : [];
     if (names.length <= this.opts.thumbMax) return;
     names.map((n) => { try { return { n: n, t: fs.statSync(path.join(tdir, n)).mtime.getTime() }; } catch (e) { return { n: n, t: 0 }; } })
         .sort((x, y) => y.t - x.t).slice(this.opts.thumbMax)
@@ -2112,11 +2425,11 @@ Daemon.prototype.pruneThumbs = function (tdir) {
 // Every play keeps its start in this.restart until its first tick puts it there; a pause, resume, seek (or fill) sent
 // meanwhile changes it (the last word counts), a stop or another play replaces it.
 Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, restore) {
-    if (!ID_RE.test(String(id))) return this.emit({ ev: 'error', msg: 'bad id' });
+    if (!isVid(id)) return this.emit({ ev: 'error', msg: 'bad id' });
     if (!/^\d{2,4}x\d{2,4}$/.test(String(rect))) rect = '1280x720';
     const own = restore || { ms: 0, paused: false, height: qualityHeight(quality, readJson(this.opts.leaseFile)) };
     this.restart = own;
-    await this.stop(null);
+    await Promise.all([this.stop(null), this.stopDownload()]);   // playing always wins: a download starts again later
     if (this.restart !== own) return undefined;   // stopped, or replaced, while the one before stopped
     if (own.fill !== undefined) fill = own.fill;
     const gen = ++this.gen;
@@ -2148,6 +2461,7 @@ Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, resto
         this.fullReady = false;
         this.setState('preparing');
         const waits = this.opts.fetchRetryMs || [];
+        let vp9Again = false;
         for (let k = 0; ; k++) {
             try {
                 const x = this.extracting;   // its lookup is nearly there: wait for it rather than redo it
@@ -2157,6 +2471,7 @@ Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, resto
                 break;
             } catch (e) {
                 if (gen !== this.gen) return undefined;
+                if (/^vp9:/.test(e.message) && !vp9Again) { vp9Again = true; k--; continue; } // again at once, as H.264
                 // the video itself refused (gone, private, members, age): no retry; else the network, maybe back soon
                 if (k >= waits.length || PERMANENT_RE.test(e.message)) {
                     if (!PERMANENT_RE.test(e.message)) this.ytdlpSoon();   // after the retries: maybe a YouTube change
@@ -2182,6 +2497,8 @@ Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, resto
     this.elapsed = 0;
     this.total = 0;
     this.stoppedAt = null;
+    this.heldAt = null;
+    this.headFile = false;
     this.sawPlay = false;
     this.ticking = false;
     this.lastTickAt = Date.now();
@@ -2214,6 +2531,7 @@ Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, resto
 // connect + playFile, once more after a wait (BMW can refuse a route just after a disconnect: E_NOT_POSSIBLE, seen on
 // marilykinson-glitch's car); gen: the play or resume it belongs to, gone stale -> the first error, no second try
 Daemon.prototype.startAudio = async function (file, gen) {
+    this.headFile = path.basename(file) === 'audio.head.m4a'; // the player's file: paused on the head, onFullAudio drops `head` first
     try {
         return await this.audio.play(file);
     } catch (e) {
@@ -2259,6 +2577,7 @@ Daemon.prototype.switchToFull = async function () {
     let target;
     try {
         await this.audio.replay(path.join(this.cur.dir, 'audio.m4a'));
+        this.headFile = false;
         if (gen !== this.gen) return undefined;
         target = this.elapsed + (Date.now() - this.lastTickAt);
         if (this.total) target = Math.min(target, Math.max(0, this.total - 1000));
@@ -2283,6 +2602,7 @@ Daemon.prototype.waitFull = function (ms) {
     this.log('audio: past the head at ' + ms + ', waiting for audio.m4a');
     this.headWait = true;
     this.elapsed = ms;
+    this.firstTime(ms);
     this.toYtdec('pause');
     this.checkBuffering();
     this.sawPlay = false;             // (STOP: PAUSE leaves the player playing; switchToFull plays the full file anyway)
@@ -2302,7 +2622,7 @@ Daemon.prototype.fetchVideo = function (id, dir, how) {
             this.chownFetch(dir);
         }
         const info = !how && this.freshInfo(id) ? ['--info', this.infoFile(id)] : [];
-        const child = this.spawnJob(['fetch', '--cache-dir', this.ytc(), '--height', String(this.cur.height || 720)].concat(info, this.pyzArgs(), ['--', id, dir]));
+        const child = this.spawnJob(['fetch', '--cache-dir', this.ytc(), '--height', String(this.cur.height || 720)].concat(this.avc1Only ? ['--avc1'] : [], info, this.pyzArgs(), ['--', id, dir]));
         this.fetcher = child;
         this.preparing = id;
         this.fetchedMs = 0;
@@ -2356,7 +2676,11 @@ Daemon.prototype.fetchVideo = function (id, dir, how) {
                 }
                 if (audio || head !== null) pct(70 + 29 * Math.min(1, this.fetchedMs / this.opts.startVideoMs));
             } else if (m.ev === 'done') done = true;
-            else if (m.ev === 'error') err = String(m.msg);
+            else if (m.ev === 'error') {
+                err = String(m.msg);
+                // "vp9: ..." = a VP9 stream it could not read: H.264 from now on (play fetches again at once)
+                if (/^vp9:/.test(err) && !this.avc1Only) { this.setAvc1(); this.log('fetch: ' + err + ' - H.264 only from now on'); }
+            }
             check();
             this.checkBuffering();
         }));
@@ -2404,7 +2728,10 @@ Daemon.prototype.failPlayback = async function (msg) {
     await Promise.all([this.audio.release(), this.stopFetch()]);
     if (g !== this.gen) return;   // a new video (or a stop) came in meanwhile: the error was the old one's
     this.setState('error');
-    this.emit({ ev: 'error', msg: msg });
+    // offline: no uplink lease, or the network's own words (the app then points to the downloads)
+    const offline = !fs.existsSync(this.opts.leaseFile) || NET_RE.test(msg);
+    this.emit(Object.assign({ ev: 'error', msg: msg }, offline ? { offline: true } : {}));
+    this.pumpDownload();
 };
 // reason: 'idle' | 'ended' | null (internal, before a new play: no state event)
 Daemon.prototype.stop = async function (reason) {
@@ -2427,7 +2754,8 @@ Daemon.prototype.stop = async function (reason) {
         this.setState(reason);
         if (this.pos) this.sendPositions();
         this.cur = null;
-        this.prune();          // a played video goes
+        this.prune();          // a played video goes (not a download)
+        this.pumpDownload();
     }
 };
 // a start under way that pause, resume and seek leave to this.restart (its first tick applies it): a play not at the
@@ -2444,21 +2772,53 @@ Daemon.prototype.pause = async function () {
     // starts the file again where it stopped
     this.savePos(true);
     if (this.cur && this.cur.track) this.ping(this.cur, true);
-    if (this.headWait) return; // already stopped, waiting for audio.m4a
-    await this.hold(this.elapsed); // (the last tick: at most a fraction of a second back)
+    if (this.headWait) { this.firstTime(this.elapsed); return; } // already stopped, waiting for audio.m4a
+    let at = this.elapsed; // (the last tick: at most a fraction of a second back)
+    if (this.restart && !this.restart.restore) { // before the play's first tick: resume() starts at its place
+        if (this.restart.ms > 0) at = Math.floor(this.restart.ms);
+        this.restart = null;
+    }
+    this.firstTime(at);
+    await this.hold(at);
+};
+// the app's bar and clock need one `time` per play, tick or not (car, 0.6.0: a pause, or a wait for audio.m4a, at the
+// start left none). The head's own ~60 s total is no length
+Daemon.prototype.firstTime = function (at) {
+    const total = this.cur && (this.cur.durationMs || (this.head || this.headFile ? 0 : this.total));
+    if (this.timeSent || !(total > 0)) return;
+    this.timeSent = true;
+    if (!this.total) this.total = total;
+    this.emit({ ev: 'time', elapsed: at, total: total });
 };
 // the player stopped at ms (STOP: our own, not the end of the file), for resume() to start it there again
 Daemon.prototype.hold = function (ms) {
     this.stoppedAt = ms;
     this.elapsed = ms;
     this.sawPlay = false;
+    this.heldAt = ms;   // the player's place at our STOP: a tick well past it, it plays on (heldOn)
+    this.heldStops = 1;
+    this.heldStopAt = Date.now();
     return this.audio.button('STOP');
+};
+// a tick at ms while paused past heldAt: the player ignored our STOP (car, 0.4.9: the head file played to its end, the
+// clock moving on under "paused"). STOP again (at most every heldStopMs); still playing after that one: the connection
+// goes (no sound), resume() connects again at stoppedAt as after any STOP mid-file
+Daemon.prototype.heldOn = function (ms) {
+    if (this.heldStops > 2 || Date.now() - this.heldStopAt < this.opts.heldStopMs) return undefined;
+    this.heldStopAt = Date.now();
+    if (this.heldStops++ < 2) {
+        this.log('audio: the player plays on at ' + ms + ' while paused at ' + this.stoppedAt + ': STOP again');
+        return this.audio.button('STOP');
+    }
+    this.log('audio: the player still plays at ' + ms + ' after a second STOP: audio released, resume connects again at ' + this.stoppedAt);
+    return this.audio.release().catch((e) => this.log('release: ' + e));
 };
 Daemon.prototype.resume = async function () {
     if (this.restart) this.restart.paused = false;
     if (this.waiting()) return;
     if (this.state !== 'paused') return;
     this.paused = false;
+    this.heldAt = null;
     this.lastProgress = Date.now(); this.played = 0;
     this.setState('playing');
     if (this.headWait) return; // still past the head: ytdec and the player stay paused until the switch
@@ -2541,6 +2901,12 @@ Daemon.prototype.setFill = function (on) {
 Daemon.prototype.requality = async function (quality) {
     const c = this.cur, h = qualityHeight(quality, readJson(this.opts.leaseFile)), was = this.restart;
     if (!c || c.stopped || h === (was ? was.height : c.height)) return undefined;
+    if (this.isSaved(c.id) && isReady(c.dir)) return undefined;   // a download keeps its file (and plays offline)
+    return this.refetch(quality, h);
+};
+// the same video fetched again at quality (height h) from where it is, paused if it was (a restart under way: its place)
+Daemon.prototype.refetch = async function (quality, h) {
+    const c = this.cur, was = this.restart;
     const restore = { ms: was ? was.ms : this.elapsed, paused: was ? was.paused : this.state === 'paused', fill: was ? was.fill : undefined, height: h, restore: true };
     this.restart = restore;
     await this.stop(null);
@@ -2555,13 +2921,20 @@ Daemon.prototype.onTime = function (v) {
     if (!(v.total > 1)) return; // {elapsed:0,total:1} right after playFile
     if (this.tickWaiter) { this.tickWaiter(); return; } // resume(): the restarted file plays, its setTime can follow
     if (this.replayingNow()) return; // replayAt: the file restarts at 0, our setTime is still to come
-    if (this.switching || this.headWait) return; // the restart's times, or a paused player
+    if (this.switching) return; // the restart's times
+    if (this.paused && this.stoppedAt !== null && this.stoppedAt !== undefined) { // paused: the place is stoppedAt, not the player's
+        if (this.heldAt !== null && v.elapsed > this.heldAt + 1500) this.heldOn(v.elapsed);   // (also waiting past the head)
+        if (!this.total && !this.head && !this.headFile) this.total = v.total; // no length known at the pause: this tick's
+        this.firstTime(this.stoppedAt);
+        return;
+    }
+    if (this.headWait) return; // a paused player
     if (this.settle && Date.now() < this.settle.until && v.elapsed < this.settle.ms - 2000) return; // before our setTime landed
     const step = v.elapsed - this.elapsed;
     if (step > 0 && step < 2000) this.played = (this.played || 0) + step;   // the watchdog's audio time (seeks excluded)
     this.elapsed = v.elapsed;
     this.lastTickAt = Date.now();
-    this.total = this.head ? (this.cur.durationMs || v.total) : v.total; // the head's own total is ~60 s
+    this.total = this.head || this.headFile ? (this.cur.durationMs || v.total) : v.total; // the head's own total is ~60 s
     if (this.head && !this.fullReady && v.elapsed >= this.head.ms - this.opts.headMarginMs) {
         this.waitFull(v.elapsed).catch((e) => this.log(e));
         return;
@@ -2599,6 +2972,8 @@ Daemon.prototype.onPlayerState = function (v) {
     if (!this.ticking) return;
     if (v === 'PLAYER_STATE_PLAY') this.sawPlay = true; // also mid-switch: the full file's own PLAY arms its end
     if (this.switching) return;
+    // paused with the place kept (a STOP heeded late, or the file ran out while it played on): resume() starts it there
+    if (v === 'PLAYER_STATE_STOP' && this.paused && this.stoppedAt !== null && this.stoppedAt !== undefined) { this.sawPlay = false; return; }
     // the head file ran out (before onTime saw its end): wait for audio.m4a, never `ended`
     if (v === 'PLAYER_STATE_STOP' && this.head && this.sawPlay) {
         this.sawPlay = false;
@@ -2616,6 +2991,7 @@ Daemon.prototype.onPlayerState = function (v) {
         }
         this.log('audio stopped at ' + this.elapsed + ' of ' + this.total + ': held as paused');
         this.stoppedAt = this.elapsed;
+        this.heldAt = null;   // stopped by itself: no STOP of ours to repeat
         this.paused = true;
         this.toYtdec('pause');
         this.setState('paused');
@@ -2680,7 +3056,7 @@ Daemon.prototype.spawnYtdec = function (seekMs) {
     this.eof = false;
     child.stdin.on('error', () => { /* EPIPE when it dies: handled by exit */ });
     child.on('error', (e) => this.ytdecDied(child, e.message));
-    child.on('exit', (code, sig) => this.ytdecDied(child, 'exit ' + (sig || code)));
+    child.on('exit', (code, sig) => (code === 4 ? this.ytdecCodec(child) : this.ytdecDied(child, 'exit ' + (sig || code))));
     readline.createInterface({ input: child.stdout }).on('line', (l) => this.guard(() => this.onYtdecLine(child, l)));
     this.ytdecKnew = this.fetchedMs;   // its index at the start: the video fetched so far
     this.videoBehind = seekMs !== null && seekMs + 1000 >= this.fetchedMs;
@@ -2741,6 +3117,28 @@ Daemon.prototype.ytdecDied = function (child, why) {
     this.emit({ ev: 'error', msg: 'video failed, audio only' });
     return undefined;
 };
+// ytdec exit 4: it cannot decode this video's VP9 here (the plugin, or no frame out of it). H.264 from now on, and this
+// video fetched again as H.264 from where it is, once (a quality restart at the same height); again: audio only
+Daemon.prototype.setAvc1 = function () {
+    this.avc1Only = true;
+    try {
+        if (!fs.existsSync(this.opts.stateDir)) { mkdirp(path.dirname(this.opts.stateDir)); fs.mkdirSync(this.opts.stateDir, 0o700); }
+        writeIfChanged(path.join(this.opts.stateDir, 'codec.json'), JSON.stringify({ avc1: true }) + '\n', 0o644);
+    } catch (e) { this.log('codec: ' + e.message); }
+};
+Daemon.prototype.ytdecCodec = function (child) {
+    if (child !== this.child) return undefined;
+    this.child = null;
+    const c = this.cur;
+    if (!this.ticking || !c) return undefined;
+    this.setAvc1();
+    this.log('ytdec: cannot decode ' + c.id + ' here (VP9), H.264 from now on');
+    // a download offline is not fetched again: its files are all there is, so audio only, as a retry. Online it is, as
+    // H.264 (its marker stays: an H.264 download once that fetch completes)
+    if (this.codecRetry === c.id || this.isSaved(c.id) && isReady(c.dir) && !fs.existsSync(this.opts.leaseFile)) { this.emit({ ev: 'error', msg: 'video failed, audio only' }); return undefined; }
+    this.codecRetry = c.id;
+    return this.refetch(c.height, c.height).catch((e) => this.log('h264 again: ' + e));
+};
 Daemon.prototype.watchdog = function () {
     if (!this.child || this.state !== 'playing' || !this.videoOn || this.eof) return;
     // waiting for video not fetched yet (buffering, or the fetcher ended early): not a stall
@@ -2755,12 +3153,13 @@ Daemon.prototype.watchdog = function () {
 };
 
 Daemon.prototype.close = async function () {
+    this.closed = true;   // no download starts from here (a stop, a late client-gone)
     this.timers.forEach(clearInterval);
     [this.spare, this.extracting, this.ytdlpRun].forEach((x) => { if (x) { try { x.child.kill('SIGKILL'); } catch (e) { /* gone */ } } });
     this.spare = this.extracting = this.ytdlpRun = null;
     this.account.close();
     const rc = this.rc.close();   // the phone remote off and its rule removed, alongside the audio release (4 s exit)
-    await this.stop(null);
+    await Promise.all([this.stop(null), this.stopDownload()]);   // (a cut download starts again from scratch at the next start)
     await rc;
     if (this.client) this.client.destroy();
     if (this.server) this.server.close();

@@ -2,7 +2,8 @@
 
 The car-side daemon of RideTube (`ytd.js`, Node 8, root, `jap-ridetube-d.service`), packaged as an
 mgu-deploy tool with the video decoder `ytdec` (built in `../ytdec`). yt-dlp, search and thumbnails all
-run on the car; nothing is downloaded for keeps: the cache holds the last few videos played.
+run on the car. A video played is deleted once it stops; a download (since 0.5.0, below) stays until removed and plays
+with no network.
 
 - audio: BMW MediaPlayer over SOME/IP (`/usr/lib/someip.node`), source 1046 → sink 1024,
   `playFile` on `cache/<id>/audio.m4a`. The two services' descriptions (`CommandControl` for the connection,
@@ -117,7 +118,7 @@ App → daemon (every `case` of `onLine` in `ytd.js`, no more, no fewer: `test_y
 
 | cmd | |
 |---|---|
-| `{"cmd":"hello","app":"0.4.0","lang":"ru","region":"RU"}` | → `hello` `{service, caps, clock?}`. `lang` (`^[a-z]{2}$`) and `region` (`^[A-Z]{2}$`) are optional; one that does not match is dropped (logged), never refused. Both hold for this connection only, kept for the `hl` / `gl` of its feed, search and related requests. `caps` lists only what this build really answers, from the frozen names `health`, `related`, `hist`, `ytdlp`, `remote`, `proxy`, `stream`; this build: `related`, `hist`, `health`, `ytdlp`. A service older than 0.4.0 answers `error` `unknown cmd hello`: the app reads that as no caps |
+| `{"cmd":"hello","app":"0.4.0","lang":"ru","region":"RU"}` | → `hello` `{service, caps, clock?}`. `lang` (`^[a-z]{2}$`) and `region` (`^[A-Z]{2}$`) are optional; one that does not match is dropped (logged), never refused. Both hold for this connection only, kept for the `hl` / `gl` of its feed, search and related requests. `caps` lists only what this build really answers, from the frozen names `health`, `related`, `hist`, `ytdlp`, `remote`, `proxy`, `stream`, `download`; this build: `related`, `hist`, `health`, `remote`, `ytdlp`, `download`. A service older than 0.4.0 answers `error` `unknown cmd hello`: the app reads that as no caps |
 | `{"cmd":"status"}` | → `state` (and `time` when known) |
 | `{"cmd":"search","q":".."}` | → `results` (InnerTube), or `error` `empty search` / `search offline` |
 | `{"cmd":"thumb","id":".."}` | → `thumb` (cache `thumb.rgba` first, else `thumb.js` on the car; nothing if neither works, or if the length is neither 57600 nor 230400) |
@@ -143,6 +144,10 @@ App → daemon (every `case` of `onLine` in `ytd.js`, no more, no fewer: `test_y
 | `{"cmd":"related","id":".."}` | 0.4.0, cap `related`: → `{"ev":"related","id","items":[item]}` (the TVHTML5 watch-next tiles, the video itself left out, ≤ 100; kept 10 min per video and language) or `{"ev":"related","id","error"}` (`bad id`, `related offline`) |
 | `{"cmd":"ytdlp","auto":bool}` | 0.4.1, cap `ytdlp` (WP6): `auto` optional (sets the self-update on or off, kept in `state/ytdlp.json`) → `{"ev":"ytdlp","auto","version","bundled","checking"}`, also after each look for a newer yt-dlp (above, "On the car, between releases"). `version`: the yt-dlp fetches use; `bundled`: `ytdlp.pyz`'s, known after the first look |
 | `{"cmd":"remote","on":bool,"lang"?}` | 0.4.1, cap `remote` (WP9): the phone remote on or off (below, "Phone remote"); `lang` the app's language for the phone page (`en fr nl de es it pt ru zh-CN`, anything else: `en`) → `{"ev":"remote","on","url","expires"}`: `url` `http://<hotspot address>:8471/#<token>` while on and the hotspot has an address, else null; `expires` the seconds left; `error` (with `on` false) when it could not be turned on. `on` not a bool: only that event. Off by default; off again after 1 hour with no phone action, when the app goes away, when its server stops and at exit |
+| `{"cmd":"library"}` | 0.5.0, cap `download`: → `library` (below) |
+| `{"cmd":"download","id":"..","meta":{"title","channel","duration_s"},"quality":q}` | 0.5.0, cap `download`: keeps the video on the car (`cache/saved/<id>`, root's) → `library`. Fetched one at a time by `ytfetch.py fetch` as the fetch uid, into the video's folder as a play fetches it, at `quality`'s height (as `play`); never while a play starts, plays or is paused (a play stops the download, which starts again from scratch later), and only with 4 GB free in the cache's file system (else its item says `not enough space`). After 3 failures (1 for a refused video) it is given up: `download failed` (asked again: tried again). Kept until `remove`: the cleanup after a play and the thumbnails' cap skip it. A downloaded video plays from its files, with no network. `meta` (the tile's) names it until the fetch's own `meta.json` |
+| `{"cmd":"remove","id":".."}` | 0.5.0, cap `download`: forgets the download, stops it if it is being fetched, deletes its files (the one playing: once it stops) and its thumbnail → `library` |
+| `{"cmd":"auto_download","max":N}` | 0.5.0, cap `download`: auto-downloads (kept in `state/autodl.json`; absent: off): `max` 0 (off) to 10, the newest Subscriptions videos not watched to the end (no Shorts, live or members-only videos, up to 1 hour), looked for every 30 min while signed in and on Wi-Fi (the uplink lease's `wlan*`: never on phone data, never with no lease) → `{"ev":"auto_download","max"}`. Their items carry `auto: true`; one goes once watched, when newer videos push it out, or when `max` goes down |
 | `{"cmd":"proxy","mode":"off\|wireproxy\|tailscale"}` | later, not yet implemented, cap `proxy` (WP11): → `{"ev":"net","proxy","ok"}`; until then `error` `not implemented proxy` |
 
 A command not in this table: `{"ev":"error","msg":"unknown cmd <cmd>"}`. A command of the table whose package has not
@@ -161,7 +166,11 @@ Daemon → app:
 - `{"ev":"results","q","items":[item]}` (`meta: ["12K views"]` when there is a view count).
 - `{"ev":"thumb","id","w","h","rgba":"<base64 w*h*4 bytes>"}` (320x180; 160x90 from caches older than 0.1.6; the size comes
   from the length; a 320x180 line is ~307 kB).
-- `{"ev":"error","msg"}` (with `cmd` for a command not implemented yet).
+- `{"ev":"error","msg"}` (with `cmd` for a command not implemented yet). A play that failed carries `"offline":true` when
+  the car had no uplink lease or the fetch failed for the network (the app then points to the downloads).
+- 0.5.0, cap `download`: `{"ev":"library","items":[{id,title,channel,duration_s,ready,pct?,error?,auto?}]}`: the downloads,
+  newest asked first, sent on each change. `ready`: on the car, playable offline; else queued, or being fetched (`pct`
+  0-99), or `error` `download failed` / `not enough space`. `{"ev":"auto_download","max"}`: the setting (above).
 - `{"ev":"retry","id","n","msg"}`: the fetch of the video being prepared failed (the network, not the video), tried again
   after a wait; `n` counts from 1.
 - `{"ev":"extras","id","chapters":[[ms,title]],"segments":[[ms,ms,category]]}`: the playing video's chapters (yt-dlp's)

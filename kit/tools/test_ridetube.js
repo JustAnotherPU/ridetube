@@ -57,7 +57,7 @@ async function clientAndModel() {
     await until(() => d.cmds('status').length, 2000, 'status on connect');
     assert.ok(m.connected, 'connected');
     await until(() => d.cmds('auth_status').length, 2000, 'auth_status on connect');
-    assert.deepStrictEqual(d.got.slice(1, 3), [{ cmd: 'status' }, { cmd: 'auth_status' }], 'on connect: status, then the account (no library: nothing is kept on the car)');
+    assert.deepStrictEqual(d.got.slice(1, 3), [{ cmd: 'status' }, { cmd: 'auth_status' }], 'on connect: status, then the account (the library: asked after hello, cap download)');
     assert.strictEqual(d.got[0].cmd, 'hello', 'hello first: the service skips no certificate date before the app can warn');
 
     // yt-dlp updates (cap ytdlp): told once hello lists the cap, and on a change; nothing without the cap; the daemon's
@@ -319,7 +319,10 @@ async function appFrames() {
       assert.deepStrictEqual(news.due(undefined, true, '0.5.0'), { show: '0.5', seen: '0.5' }, 'an update from before (saved settings): the notes');
       assert.deepStrictEqual(news.due('0.4', true, '0.5.2'), { show: '0.5', seen: '0.5' }, '0.4 -> 0.5: the notes');
       assert.deepStrictEqual(news.due('0.5', true, '0.5.3'), { show: null, seen: '0.5' }, 'within 0.5: once only');
-      assert.deepStrictEqual(news.due('0.5', true, '0.6.0'), { show: null, seen: '0.6' }, 'a series without notes: nothing');
+      assert.deepStrictEqual(news.due('0.5', true, '0.6.0'), { show: '0.6', seen: '0.6' }, '0.5 -> 0.6: the notes');
+      assert.deepStrictEqual(news.due(undefined, false, '0.6.0'), { show: null, seen: '0.6' }, 'first install of 0.6: nothing new');
+      assert.deepStrictEqual(news.due('0.6', true, '0.6.1'), { show: null, seen: '0.6' }, 'within 0.6: once only');
+      assert.deepStrictEqual(news.due('0.6', true, '0.7.0'), { show: null, seen: '0.7' }, 'a series without notes: nothing');
       const appV = require('../../apps/jap_ridetube/app.json').version;
       assert.ok(news.NOTES[news.series(appV)], 'this release (' + appV + ') has notes');
       const keys = [news.TITLE].concat(...Object.values(news.NOTES));
@@ -373,7 +376,7 @@ async function appFrames() {
     assert.deepStrictEqual(d.cmds('hello')[0], { cmd: 'hello', app: require('../../apps/jap_ridetube/app.json').version, lang: 'en', region: 'GB' }, 'hello: the app version, the car\'s en_GB as YouTube language and country');
     const POOL = (id) => id >= 8 && id < 64;
     const frame = () => scan(fs.readFileSync(file));
-    // first screen: Home, signed out: the sign-in card, no tiles; never a library (nothing is kept on the car)
+    // first screen: Home, signed out, nothing watched or downloaded yet: the sign-in card, no tiles
     await hu.ui.open('VIEW');
     await hu.loopFn();
     await sleep(100);
@@ -1072,6 +1075,7 @@ async function appFrames() {
     if (own) await wp7Frames({ hu, d, disp, drawn, texts, file, hmiLang, speed: (v) => speedH({ speedVehicleCentreOfGravity: v }) });
     if (own) await wp10Frames({ hu, d, disp, drawn, texts, wp5, speed: (v) => speedH({ speedVehicleCentreOfGravity: v }) });
     if (own) await wp12Frames({ hu, d, disp, car, speed: (v) => speedH({ speedVehicleCentreOfGravity: v }) });
+    if (own) await offlineFrames({ hu, d, disp, drawn, texts });
     Recorder.prototype.text = ot; Recorder.prototype.fillRect = of;
     d.server.close();
 }
@@ -1589,11 +1593,14 @@ async function wp7Frames(x) {
     await page('logs cancel', async () => tgt('logs:cancel').run());
     await page('player', async () => { d.send({ ev: 'state', state: 'playing', id: 'RUSVIDEO001', title: 'Новости дня' }); d.send({ ev: 'time', elapsed: 1000, total: 300000 }); hu.handlers.BTN_NOW(); await sleep(300); await hu.loopFn(); });
     await page('signed out', async () => { d.send({ ev: 'state', state: 'idle' }); d.send({ ev: 'auth', state: 'code', code: 'ABC-DEF', url: 'https://www.google.com/device' }); hu.handlers.BTN_HOME(); });
+    // (0.6.0) signed out with a video left half watched: Home shows Continue watching and a Sign in tile; the tile, the card
+    assert.ok(texts.indexOf('Продолжить просмотр') >= 0 && disp.pageTargets.some((x) => /:::signin$/.test(x.key)), 'signed out: Continue watching, then Sign in: ' + texts.join('|'));
+    await page('sign in', async () => disp.pageTargets.find((x) => /:::signin$/.test(x.key)).run());
     assert.ok(texts.indexOf('Введите этот код на телефоне') >= 0, 'the sign-in card: ' + texts.join('|'));
     // the rail's labels fit the 90 px under their icon (bold, the page lit)
     const { Canvas } = require(path.join(hu.kitDir, 'canvas'));
     const cv = new Canvas(200, 40);
-    ['Главная', 'Подписки', 'Позже', 'Плейлисты', 'История', 'Играет', 'Поиск'].forEach((l) => assert.ok(cv.textWidth(l, 18, { literal: true, font: 'bold' }) <= 90, l + ' fits the rail'));
+    ['Главная', 'Подписки', 'Позже', 'Плейлисты', 'История', 'Играет', 'Поиск', 'Медиатека'].forEach((l) => assert.ok(cv.textWidth(l, 18, { literal: true, font: 'bold' }) <= 90, l + ' fits the rail'));
     // back to English: the same page as before, hello en without a region
     d.send({ ev: 'auth', state: 'signed_in' });
     set.set('language', 'en');
@@ -1809,6 +1816,93 @@ async function wp10Frames(x) {
 // ======== WP12 Controller: every target of every page reached by turning the knob (the kit's own path, Display._ccu),
 // the controller never left on a key the page after a change lacks, pushed left goes back from the player and the
 // question pages (logs, clock warning, Video while driving)
+// ======== 0.6.0 downloads (cap download): Library on the rail and in the menu, On this car on Home, the player's
+// Download / Downloaded, a downloading tile, signed out Continue watching and On this car, the offline hint
+async function offlineFrames(x) {
+    const { hu, d, disp, drawn, texts } = x;
+    const tgt = (k) => disp.pageTargets.find((t) => (k instanceof RegExp ? k.test(t.key) : t.key === k));
+    const keys = () => disp.pageTargets.map((t) => t.key);
+    const vis = [], v = hu.ui.visible;
+    hu.ui.visible = function (n, on) { if (n === 'BTN_LIB') vis.push(on); return v.apply(hu.ui, arguments); };
+    d.send({ ev: 'auth', state: 'signed_in' });
+    d.send({ ev: 'hello', service: '0.5.0', caps: ['health', 'related', 'hist', 'remote'] });
+    await sleep(100); hu.handlers.BTN_HOME(); await sleep(100); await drawn();
+    assert.ok(!tgt('rail:library') && !vis.some(Boolean), 'no cap: no Library: ' + keys());
+    const nLib = d.cmds('library').length;
+    d.send({ ev: 'hello', service: '0.5.0', caps: ['health', 'related', 'hist', 'remote', 'download'] });
+    await until(() => d.cmds('library').length > nLib, 2000, 'hello: the library asked');
+    await lastIs(d, { cmd: 'auto_download', max: 0 }, 'the auto-download setting told: off by default');
+    assert.strictEqual(vis.slice(-1)[0], true, 'the menu\'s Library shown');
+    d.send({ ev: 'library', items: [
+        { id: 'DLREADY0001', title: 'Saved for the trip', channel: 'Chan', duration_s: 600, ready: true },
+        { id: 'DLGOING0001', title: 'On its way', channel: 'Chan', duration_s: 300, ready: false, pct: 42 },
+        { id: 'DLQUEUE0001', title: 'Next in line', channel: 'Chan', duration_s: 300, ready: false },
+        { id: 'DLFAIL00001', title: 'Broken', channel: 'Chan', duration_s: 300, ready: false, error: 'download failed' },
+        { id: 'DLFULL00001', title: 'Too big', channel: 'Chan', duration_s: 300, ready: false, error: 'not enough space' }] });
+    d.send({ ev: 'feed', which: 'home', items: [{ id: 'HOMEVIDEO01', title: 'A home video', channel: 'X', duration_s: 60 }] });
+    await sleep(100); await drawn();
+    assert.ok(texts.indexOf('On this car') >= 0 && tgt(/^h:\d+:DLREADY0001$/), 'Home: the On this car shelf: ' + texts.join('|'));
+    ['Downloading 42 %', 'Downloading...', 'Download failed', 'Not enough space'].forEach((t) => assert.ok(texts.indexOf(t) >= 0, t + ': ' + texts.join('|')));
+    tgt('rail:library').run();
+    await sleep(50); await drawn();
+    assert.ok(texts.indexOf('Library') >= 0 && texts.indexOf('1 video') >= 0 && tgt(/^l:\d+:DLGOING0001$/), 'the Library page, one ready: ' + texts.join('|'));
+    // a download played (from its tile), then removed from the player
+    tgt(/^l:\d+:DLREADY0001$/).run();
+    await until(() => (d.cmds('play').slice(-1)[0] || {}).id === 'DLREADY0001', 2000, 'the download plays');
+    d.send({ ev: 'state', state: 'playing', id: 'DLREADY0001', title: 'Saved for the trip' }); d.send({ ev: 'time', elapsed: 1000, total: 600000 });
+    hu.handlers.BTN_NOW(); await sleep(100); await drawn();
+    assert.ok(tgt('ov:dl') && texts.indexOf('Downloaded') >= 0, 'the player: Downloaded: ' + texts.join('|'));
+    const nRm = d.cmds('remove').length;
+    tgt('ov:dl').run();
+    await sleep(100); await drawn();
+    assert.ok(d.cmds('remove').length === nRm && texts.indexOf('Press again to remove') >= 0, 'Downloaded pressed once: asks again, nothing removed: ' + texts.join('|'));
+    tgt('ov:dl').run();
+    await lastIs(d, { cmd: 'remove', id: 'DLREADY0001' }, 'Downloaded pressed twice: removed');
+    // another video: Download; asked with its title and the quality setting; then Downloading...
+    d.send({ ev: 'state', state: 'playing', id: 'NEWVIDEO001', title: 'Fresh one' });
+    await sleep(100); await drawn();
+    assert.ok(texts.indexOf('Download') >= 0, 'not saved: Download: ' + texts.join('|'));
+    tgt('ov:dl').run();
+    await until(() => (d.cmds('download').slice(-1)[0] || {}).id === 'NEWVIDEO001', 2000, 'Download pressed');
+    const dl = d.cmds('download').slice(-1)[0];
+    assert.deepStrictEqual([dl.meta.title, dl.meta.duration_s, typeof dl.quality], ['Fresh one', 600, 'string'], 'asked with its title, length and quality: ' + JSON.stringify(dl));
+    d.send({ ev: 'library', items: [{ id: 'NEWVIDEO001', title: 'Fresh one', ready: false, pct: 7 }, { id: 'DLGOING0001', title: 'On its way', ready: true }] });
+    await sleep(100); await drawn();
+    assert.ok(texts.indexOf('Downloading 7 %') >= 0, 'the player says how far: ' + texts.join('|'));
+    // a play failing with no internet, downloads on the car: where they are; online: not said
+    d.send({ ev: 'state', state: 'error', id: 'NEWVIDEO001' }); d.send({ ev: 'error', msg: 'fetch: getaddrinfo EAI_AGAIN', offline: true });
+    await sleep(100); await drawn();
+    assert.ok(texts.indexOf('Downloaded videos still play - Library') >= 0, 'the offline hint: ' + texts.join('|'));
+    d.send({ ev: 'error', msg: 'fetch: Video unavailable' });
+    await sleep(100); await drawn();
+    assert.ok(texts.indexOf('Downloaded videos still play - Library') < 0, 'online: no hint');
+    d.send({ ev: 'state', state: 'idle' });
+    // signed out: Home shows what is on the car and a Sign in tile (never only the card)
+    d.send({ ev: 'auth', state: 'signed_out' });
+    hu.handlers.BTN_HOME(); await sleep(100); await drawn();
+    assert.ok(texts.indexOf('On this car') >= 0 && tgt(/:::signin$/), 'signed out: On this car, Sign in: ' + texts.join('|'));
+    d.send({ ev: 'auth', state: 'code', code: 'ABC-DEF', url: 'https://www.google.com/device' });
+    tgt(/:::signin$/).run(); await sleep(100); await drawn();
+    assert.ok(texts.indexOf('Enter this code on your phone') >= 0 && tgt('rail:home'), 'the card, Home lit: ' + texts.join('|'));
+    d.send({ ev: 'auth', state: 'signed_in' });
+    await sleep(100); await drawn();
+    assert.ok(texts.indexOf('Enter this code on your phone') < 0, 'signed in: Home again');
+    // the setting: told at once
+    hu.ctx.settings.set('auto_download', '5');
+    await lastIs(d, { cmd: 'auto_download', max: 5 }, 'auto-download 5');
+    hu.ctx.settings.set('auto_download', '0');
+    await lastIs(d, { cmd: 'auto_download', max: 0 }, 'auto-download off');
+    // every catalog: the rail's Library fits its 90 px
+    const { Canvas } = require(path.join(hu.kitDir, 'canvas'));
+    const cv = new Canvas(200, 40);
+    fs.readdirSync(path.join(__dirname, '..', 'runtime', 'locales')).forEach((f) => {
+        const cat = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'runtime', 'locales', f), 'utf8')), l = cat.Lib || cat.Library;   // (Lib: a shorter rail label)
+        if (!/^zh/.test(f)) assert.ok(cv.textWidth(l, 18, { literal: true, font: 'bold' }) <= 90, f + ': ' + l + ' fits the rail');
+    });
+    hu.ui.visible = v;
+    console.log('ok   downloads: Library and On this car, Download / Downloaded in the player, the tiles\' states, signed out, the offline hint, auto-download');
+}
+
 async function wp12Frames(x) {
     const { hu, d, disp, speed, car } = x;
     let K = 5000;

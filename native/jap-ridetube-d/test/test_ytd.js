@@ -26,6 +26,8 @@ fs.chmodSync(fakeYtdec, 0o755);
 process.env.FAKE_YTDEC_LOG = ytlog;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const setMode = (m) => fs.writeFileSync(ytlog + '.mode', m);
+// VP9 back on for the next test: the flag and its state/codec.json (a later daemon on that state dir would read it)
+const noAvc1 = (x) => { x.avc1Only = false; try { fs.unlinkSync(path.join(x.opts.stateDir, 'codec.json')); } catch (e) { /* none */ } };
 
 // ---- fake someip
 const calls = [];
@@ -159,12 +161,10 @@ async function main() {
         assert.ok(conns.some((x) => x.mainConnectionID === 15));
     });
 
-    await t('no downloads: library / download / remove are unknown commands; thumb read from the cache', async () => {
-        for (const cmd of ['library', 'download', 'remove']) {
-            c.clear();
-            c.send({ cmd: cmd, id: 'DemoVideo01' });
-            await c.waitFor((x) => x.ev === 'error' && x.msg === 'unknown cmd ' + cmd);
-        }
+    await t('library: nothing downloaded yet; thumb read from the cache', async () => {
+        c.clear();
+        c.send({ cmd: 'library' });
+        assert.deepStrictEqual(await c.waitFor((x) => x.ev === 'library'), { ev: 'library', items: [] });
         c.send({ cmd: 'thumb', id: 'DemoVideo01' });
         const th = await c.waitFor((x) => x.ev === 'thumb');
         assert.strictEqual(Buffer.from(th.rgba, 'base64').length, 57600);
@@ -916,11 +916,84 @@ async function main() {
         await waitUntil(() => d.fullReady);
         await sleep(100);
         assert.strictEqual(called('playFile').length, 1);
+        tick(15000); // the paused head file's time: still the video's total, not the head's 60 s (car, 0.4.9: 1:04)
+        assert.strictEqual(d.total, 600000);
         c.send({ cmd: 'resume' });
         await waitUntil(() => called('setTime').length === 1, 5000);   // (no tick comes: resume's 3 s tick wait runs out first)
         assert.strictEqual(path.basename(called('playFile').slice(-1)[0].a.path), 'audio.m4a');
         assert.deepStrictEqual(called('setTime')[0].a, { newTimeElapsed: 15000 });
         assert.ok(!called('sendButtonEvent').some((x) => x.a.button === 'PLAY'));
+        await stopIdle();
+    });
+
+    await t('paused on the head but the player plays on (car, 0.4.9): the clock holds, STOP again, then the audio goes; resume connects at the place', async () => {
+        await headPlay('FFFFFFFFFHB', 'hold');
+        tick(15000);
+        c.send({ cmd: 'pause' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+        await waitUntil(() => called('sendButtonEvent').length === 1);
+        c.clear();
+        const stops = () => called('sendButtonEvent').filter((x) => x.a.button === 'STOP').length;
+        tick(16000);   // within 1.5 s of the STOP: it may still land
+        tick(17000);   // plays on, but a STOP just went (heldStopMs)
+        assert.strictEqual(stops(), 1);
+        assert.strictEqual(d.elapsed, 15000, 'the clock holds while paused');
+        d.heldStopAt = 0;
+        tick(18000);
+        assert.strictEqual(stops(), 2, 'STOP again');
+        assert.ok(logs.some((l) => /plays on at 18000 while paused at 15000: STOP again/.test(l)));
+        c.send({ cmd: 'seek', ms: 40000 });   // a seek while paused moves the place; the player's own times still say it plays on
+        await waitUntil(() => d.stoppedAt === 40000);
+        tick(19000);
+        assert.strictEqual(called('disconnect').length, 0, 'rate-limited');
+        d.heldStopAt = 0;
+        tick(20000);
+        await waitUntil(() => ours().length === 0);
+        assert.ok(logs.some((l) => /still plays at 20000 after a second STOP: audio released/.test(l)));
+        d.heldStopAt = 0;
+        tick(21000);
+        subs.playerState('PLAYER_STATE_STOP');   // (the head file running out meanwhile: still paused there)
+        await sleep(100);
+        assert.strictEqual(called('disconnect').length, 1, 'released once, then quiet');
+        assert.strictEqual(d.elapsed, 40000);
+        assert.strictEqual(d.state, 'paused');
+        assert.ok(!c.evs.some((x) => x.ev === 'time'), 'no time while paused: ' + JSON.stringify(c.evs.filter((x) => x.ev === 'time')));
+        c.send({ cmd: 'resume' });
+        await waitUntil(() => called('connect').length === 2);
+        tick(300);
+        await waitUntil(() => called('setTime').length === 1, 5000);
+        assert.deepStrictEqual(called('setTime')[0].a, { newTimeElapsed: 40000 });
+        assert.strictEqual(path.basename(called('playFile').slice(-1)[0].a.path), 'audio.head.m4a');
+        await stopIdle();
+    });
+
+    await t('a play starting past the head (its resume point): one `time` with the length while it waits for audio.m4a, a pause adds none', async () => {
+        await headPlay('FFFFFFFFFHT', 'hold');
+        d.cur.durationMs = 600000;
+        c.clear();
+        c.send({ cmd: 'seek', ms: 300000 });   // before the first tick: where the start goes, as a resume point does
+        await sleep(50);
+        tick(0);
+        await waitUntil(() => d.headWait);
+        await c.waitFor((x) => x.ev === 'time');
+        c.send({ cmd: 'pause' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+        assert.deepStrictEqual(c.evs.filter((x) => x.ev === 'time').map((x) => [x.elapsed, x.total]), [[300000, 600000]]);
+        await stopIdle();
+    });
+
+    await t('paused, then a seek past the head (waiting for audio.m4a), the player playing on: STOP again there too', async () => {
+        await headPlay('FFFFFFFFFHC', 'hold');
+        tick(15000);
+        c.send({ cmd: 'pause' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+        c.send({ cmd: 'seek', ms: 300000 });
+        await waitUntil(() => d.headWait);
+        const n = called('sendButtonEvent').length;
+        d.heldStopAt = 0;
+        tick(18000);
+        assert.strictEqual(called('sendButtonEvent').length, n + 1, 'STOP again');
+        assert.ok(d.headWait && d.state === 'paused');
         await stopIdle();
     });
 
@@ -1707,7 +1780,7 @@ async function main() {
         assert.strictEqual(typeof uplinkLookup(lease), 'function');
     });
 
-    await t('a played video is deleted once stopped (nothing is kept for offline)', async () => {
+    await t('a played video is deleted once stopped (only a download is kept)', async () => {
         c.send({ cmd: 'stop' }); await c.waitFor((x) => x.ev === 'state' && x.state === 'idle');
         d.opts.keep = 0;
         fs.writeFileSync(ctl, 'done');
@@ -1774,8 +1847,8 @@ async function main() {
     });
 
     await t('hello: service version and caps; lang / region kept for the connection; a bad one dropped, never refused', async () => {
-        const FROZEN = ['health', 'related', 'hist', 'ytdlp', 'remote', 'proxy', 'stream'];
-        assert.deepStrictEqual(CAPS, ['related', 'hist', 'health', 'remote', 'ytdlp'], 'what of the protocol answers for real (WP1: related, hist; WP4: health; WP9: remote; WP6: ytdlp)');
+        const FROZEN = ['health', 'related', 'hist', 'ytdlp', 'remote', 'proxy', 'stream', 'download'];
+        assert.deepStrictEqual(CAPS, ['related', 'hist', 'health', 'remote', 'ytdlp', 'download'], 'what of the protocol answers for real (WP1: related, hist; WP4: health; WP9: remote; WP6: ytdlp; 0.5.0: download)');
         assert.ok(CAPS.every((x) => FROZEN.indexOf(x) >= 0), 'caps only from the frozen names');
         c.clear();
         c.send({ cmd: 'hello', app: '0.4.0', lang: 'ru', region: 'RU' });
@@ -2623,6 +2696,78 @@ async function main() {
         await idle();
     });
 
+    await t('VP9: ytdec exit 4 -> fetched again with --avc1 where it was, once; the next video straight to --avc1; again: audio only', async () => {
+        fs.writeFileSync(ctl, ''); setMode('ok');
+        const id = 'VP9CODEC001';
+        await fetchPlay(id);
+        assert.ok(fetchLog().argv.indexOf('--avc1') < 0);
+        tick(5000); await sleep(100);
+        c.clear(); calls.length = 0;
+        const pid = fetchLog().pid;
+        setMode('codec');
+        d.child.kill('SIGKILL');                                 // death 1: the new ytdec reads the (VP9) index: exit 4
+        await waitUntil(() => fetchLog().pid !== pid, 4000);
+        assert.deepStrictEqual(fetchLog().argv.slice(1, 7), ['fetch', '--cache-dir', path.join(cache, 'ytdlp'), '--height', '720', '--avc1']);
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'playing', 4000);
+        await sleep(100); tick(0);
+        await waitUntil(() => called('setTime').length > 0);
+        assert.deepStrictEqual(called('setTime').map((x) => x.a.newTimeElapsed), [5000], 'where it was, not 0');
+        assert.strictEqual(logs.filter((l) => /cannot decode VP9CODEC001 here \(VP9\), H\.264 from now on/.test(l)).length, 1);
+        const cf = path.join(stateDir, 'codec.json');
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(cf, 'utf8')), { avc1: true }, 'kept for the next start');
+        assert.strictEqual(new Daemon({ stateDir: stateDir, log: () => {} }).avc1Only, true, 'a restart: H.264 at once');
+        assert.ok(!c.evs.some((x) => x.ev === 'error'));
+        // the same video failing again: no third fetch, audio only
+        const pid2 = fetchLog().pid;
+        setMode('codec');
+        d.child.kill('SIGKILL');
+        await c.waitFor((x) => x.ev === 'error' && x.msg === 'video failed, audio only', 4000);
+        await sleep(300);
+        assert.strictEqual(fetchLog().pid, pid2, 'no third fetch');
+        assert.strictEqual(d.state, 'playing', 'the sound plays on');
+        await idle();
+        await fetchPlay('VP9CODEC002');                          // the next video: H.264 from the start
+        assert.ok(fetchLog().argv.indexOf('--avc1') > 0, fetchLog().argv.join(' '));
+        await idle();
+        noAvc1(d); d.codecRetry = null;
+    });
+
+    await t('VP9: exit 4 before the first tick (a refused plugin): fetched again as H.264 at the place the play was resuming to', async () => {
+        fs.writeFileSync(ctl, ''); setMode('codec');
+        d.opts.resume = true;
+        try {
+            c.clear(); calls.length = 0;
+            c.send({ cmd: 'play', id: 'VP9CODEC003', rect: '1280x720', at: 30000 });
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'playing', 4000);
+            await waitUntil(() => fetchLog().argv.indexOf('--avc1') > 0, 4000);   // no tick yet: still the start's place
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'playing' && c.evs.filter((y) => y.state === 'playing').length === 2, 4000);
+            await sleep(100); tick(0);
+            await waitUntil(() => called('setTime').length > 0);
+            assert.deepStrictEqual(called('setTime').map((x) => x.a.newTimeElapsed), [30000]);
+        } finally {
+            d.opts.resume = false;
+            noAvc1(d); d.codecRetry = null;
+        }
+        await idle();
+    });
+
+    await t('VP9: a stream ytfetch cannot read ("vp9: ...") -> fetched again at once with --avc1, no retry wait, H.264 from then on', async () => {
+        fs.writeFileSync(ctl, 'vp9'); setMode('ok');
+        d.opts.fetchRetryMs = [60000];
+        try {
+            await fetchPlay('VP9STREAM01');
+            assert.ok(fetchLog().argv.indexOf('--avc1') > 0);
+            assert.ok(!c.evs.some((x) => x.ev === 'retry' || x.ev === 'error'));
+            assert.strictEqual(d.avc1Only, true);
+            assert.strictEqual(logs.filter((l) => /fetch: vp9: laced block - H\.264 only from now on/.test(l)).length, 1);
+        } finally {
+            d.opts.fetchRetryMs = [];
+            fs.writeFileSync(ctl, '');
+            noAvc1(d);
+        }
+        await idle();
+    });
+
     await t('WP2 quality then stop at once: the video stays stopped (the restart is cancelled)', async () => {
         fs.writeFileSync(ctl, ''); setMode('ok');
         await fetchPlay('WP2QUALIT02');
@@ -2654,6 +2799,56 @@ async function main() {
             assert.deepStrictEqual(c.evs.filter((x) => x.ev === 'time').map((x) => x.elapsed), [30250]);
         } finally { d.opts.resume = false; }
         await idle();
+    });
+
+    await t('paused before the first tick (the 12 V guard at the start): one `time` with the total and the resume point; resume plays there', async () => {
+        mkVideo('PAUSEFIRST1');
+        d.opts.resume = true;
+        try {
+            c.clear(); calls.length = 0;
+            c.send({ cmd: 'play', id: 'PAUSEFIRST1', rect: '1280x720', at: 30000 });
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            d.cur.durationMs = 0;   // no length in meta: the first tick after our STOP gives it
+            c.send({ cmd: 'pause' });
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+            assert.strictEqual(d.stoppedAt, 30000, 'the resume point, not 0');
+            tick(0);
+            await c.waitFor((x) => x.ev === 'time');
+            assert.deepStrictEqual(c.evs.filter((x) => x.ev === 'time').map((x) => [x.elapsed, x.total]), [[30000, 60000]]);
+            tick(250);
+            assert.strictEqual(c.evs.filter((x) => x.ev === 'time').length, 1, 'one only');
+            calls.length = 0;
+            c.send({ cmd: 'resume' });
+            await waitUntil(() => called('playFile').length > 0);
+            tick(0);
+            await waitUntil(() => called('setTime').length > 0);
+            assert.deepStrictEqual(called('setTime')[0].a, { newTimeElapsed: 30000 });
+        } finally { d.opts.resume = false; }
+        c.send({ cmd: 'stop' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+    });
+
+    await t('paused before the first tick and no tick ever comes (the player obeys STOP at once): `time` from the length, resume at the place', async () => {
+        mkVideo('PAUSENOTICK');
+        d.opts.resume = true;
+        try {
+            c.clear(); calls.length = 0;
+            c.send({ cmd: 'play', id: 'PAUSENOTICK', rect: '1280x720', at: 30000 });
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            d.cur.durationMs = 900000;
+            c.send({ cmd: 'pause' });
+            await c.waitFor((x) => x.ev === 'time');
+            assert.deepStrictEqual(c.evs.filter((x) => x.ev === 'time').map((x) => [x.elapsed, x.total]), [[30000, 900000]]);
+            assert.strictEqual(d.restart, null);
+            calls.length = 0;
+            c.send({ cmd: 'resume' });
+            await waitUntil(() => called('playFile').length > 0);
+            tick(0);
+            await waitUntil(() => called('setTime').length > 0);
+            assert.deepStrictEqual(called('setTime')[0].a, { newTimeElapsed: 30000 });
+        } finally { d.opts.resume = false; }
+        c.send({ cmd: 'stop' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'idle');
     });
 
     await t('WP2 play: a FIFO meta.json (the fetch uid\'s folder) does not hang it; chapters read without following a symlink', async () => {
@@ -3348,6 +3543,463 @@ async function main() {
             assert.strictEqual(pickUid(wo, 'web'), 59999, 'a web uid above the range: picked again (the top free one)');
         });
         fs.chownSync = realChown9;
+    }
+
+    // ======== 0.5.0 downloads: the queue, the space floor, remove, the cleanup never deleting one, a reboot, offline
+    // play, auto-downloads. Their own daemon and cache, keep 0 as on the car
+    {
+        const droot = path.join(tmp, 'dl'), dcache = path.join(droot, 'cache'), dctl = path.join(droot, 'fetch.ctl'), dstate = path.join(droot, 'state');
+        const lease = path.join(droot, 'lease.json'), tlog = path.join(droot, 'thumb.log'), dlogs = [];
+        mkdirp(dcache);
+        fs.writeFileSync(lease, JSON.stringify({ interface: 'wlan0' }));   // online (offline: no download starts)
+        let free = 8000;
+        const mk = () => new Daemon({ someip: someip, srcGen: srcGen, ytdec: fakeYtdec, cacheDir: dcache, logDir: droot, sock: path.join(droot, 'ctl.sock'),
+            watchdogMs: 800, tickMs: 100, keep: 0, stateDir: dstate, noSetuid: true, spare: false, resume: false, fetchRetryMs: [],
+            fetcher: [process.execPath, path.join(__dirname, 'fake_ytfetch.js'), dctl], thumbCmd: [process.execPath, path.join(__dirname, 'fake_thumb.js'), tlog],
+            leaseFile: lease, freeMb: () => free, accountFile: path.join(dstate, 'account.json'), ytRequest: fakeYt, log: (m) => dlogs.push(m) });
+        let dd = mk();
+        await dd.start();
+        let dc = await client(dd.opts.sock);
+        const vdir = (id) => path.join(dcache, id);
+        const item = (id) => dd.libraryItems().find((x) => x.id === id);
+        const lib = async (pred, ms) => (await dc.waitFor((x) => x.ev === 'library' && pred(x.items), ms || 5000)).items;
+        const ready = (id) => lib((it) => it.some((x) => x.id === id && x.ready));
+        const marker = (id) => JSON.parse(fs.readFileSync(path.join(dcache, 'saved', id), 'utf8'));
+        const send = (m) => { dc.clear(); dc.send(m); };   // a wait sees only what came after
+        const has = (re) => dlogs.filter((l) => re.test(l)).length;
+
+        await t('downloads: one at a time as a play fetches (fetch uid, the quality\'s height), its progress, ready once every file is there; the thumb kept', async () => {
+            fs.writeFileSync(dctl, '');   // the fake fetch runs until told "done"
+            send({ cmd: 'download', id: 'DLVIDEO0001', meta: { title: 'One', channel: 'Chan', duration_s: 600 }, quality: '480' });
+            await sleep(20);   // (newest first by the marker's ms: two asked in the same ms would tie)
+            send({ cmd: 'download', id: 'DLVIDEO0002', meta: { title: 'Two' } });
+            let it = await lib((x) => x.some((y) => y.id === 'DLVIDEO0001' && y.pct === 20));
+            assert.deepStrictEqual(it.map((x) => [x.id, x.ready]), [['DLVIDEO0002', false], ['DLVIDEO0001', false]], 'newest asked first');
+            assert.deepStrictEqual(it[1], { id: 'DLVIDEO0001', title: 'One', channel: 'Chan', duration_s: 600, ready: false, pct: 20 });
+            assert.strictEqual(it[0].pct, undefined, 'queued: one download at a time');
+            const argv = JSON.parse(fs.readFileSync(dctl + '.log', 'utf8')).argv;
+            assert.deepStrictEqual(argv.slice(1, 5).concat(argv.slice(-3)), ['fetch', '--cache-dir', path.join(dcache, 'ytdlp'), '--height', '--', 'DLVIDEO0001', vdir('DLVIDEO0001')]);
+            assert.strictEqual(argv[5], '480', 'the height asked');
+            assert.strictEqual(fs.statSync(vdir('DLVIDEO0001')).mode & 0o777, 0o711, 'the folder as a play makes it');
+            assert.strictEqual(fs.statSync(path.join(dcache, 'saved')).mode & 0o777, 0o700, 'the markers: root only');
+            fs.writeFileSync(dctl, 'done');
+            await ready('DLVIDEO0001');
+            it = await lib((x) => x.every((y) => y.ready));
+            assert.deepStrictEqual(it.map((x) => x.title), ['Fetched DLVIDEO0002', 'Fetched DLVIDEO0001'], 'named from the fetch\'s meta.json once there');
+            assert.ok(isPlayable(vdir('DLVIDEO0002')));
+            await waitUntil(() => fs.existsSync(path.join(dcache, 'thumbs', 'DLVIDEO0001.rgba')) && fs.existsSync(path.join(dcache, 'thumbs', 'DLVIDEO0002.rgba')));
+        });
+
+        await t('downloads: none starts under 4 GB free (nor when the free space cannot be read); the item says so', async () => {
+            assert.strictEqual(dd.opts.minFreeMb, 4096, 'the default floor');
+            free = 4095;
+            send({ cmd: 'download', id: 'DLVIDEO0003', meta: { title: 'Three' } });
+            await lib((x) => x.some((y) => y.id === 'DLVIDEO0003' && y.error === 'not enough space'));
+            await sleep(300);
+            assert.ok(!dd.dl && !fs.existsSync(vdir('DLVIDEO0003')), 'not started');
+            free = null; dd.dlFull = false;
+            await sleep(300);
+            assert.ok(!dd.dl && item('DLVIDEO0003').error === 'not enough space', 'unreadable: not started either');
+            free = 4096; dd.dlFullAt = 0;
+            await ready('DLVIDEO0003');
+        });
+
+        await t('downloads: one under way stops under 1 GB free, its cut files go at once; the item says not enough space', async () => {
+            assert.strictEqual(dd.opts.dlStopFreeMb, 1024, 'the default');
+            fs.writeFileSync(dctl, '');
+            send({ cmd: 'download', id: 'DISKVIDEO01' });
+            await waitUntil(() => dd.dl && dd.dl.id === 'DISKVIDEO01' && fs.existsSync(path.join(vdir('DISKVIDEO01'), 'index.bin')));
+            free = 900;
+            await lib((x) => x.some((y) => y.id === 'DISKVIDEO01' && y.error === 'not enough space'));
+            assert.ok(has(/^download DISKVIDEO01: 900 MB free, under 1024 - stopped$/) === 1 && !dd.dl);
+            await waitUntil(() => !fs.existsSync(vdir('DISKVIDEO01')));   // not kept while it waits for space
+            free = 8000; dd.dlFullAt = 0;
+            fs.writeFileSync(dctl, 'done');
+            await ready('DISKVIDEO01');
+            send({ cmd: 'remove', id: 'DISKVIDEO01' });
+            await lib((x) => !x.some((y) => y.id === 'DISKVIDEO01'));
+        });
+
+        await t('downloads: none starts (nor clears its folder) while a stopped one\'s fetcher still exits', async () => {
+            fs.writeFileSync(dctl, '');
+            send({ cmd: 'download', id: 'STOPVIDEO01' });
+            await waitUntil(() => dd.dl && dd.dl.id === 'STOPVIDEO01' && fs.existsSync(path.join(vdir('STOPVIDEO01'), 'index.bin')));
+            const n = has(/^download STOPVIDEO01: started$/), stopped = dd.stopDownload();
+            dd.pumpDownload();   // the same tick: the fetcher is not gone yet
+            assert.ok(!dd.dl && fs.existsSync(path.join(vdir('STOPVIDEO01'), 'index.bin')), 'left alone under its fetcher');
+            await stopped;
+            await waitUntil(() => has(/^download STOPVIDEO01: started$/) === n + 1);   // once it is gone: from scratch
+            fs.writeFileSync(dctl, 'done');
+            await ready('STOPVIDEO01');
+            send({ cmd: 'remove', id: 'STOPVIDEO01' });
+            await lib((x) => !x.some((y) => y.id === 'STOPVIDEO01'));
+        });
+
+        await t('downloads: never while a play starts, plays or is paused; a play stops one, which starts again from scratch after', async () => {
+            fs.writeFileSync(dctl, '');
+            send({ cmd: 'download', id: 'DLVIDEO0004' });
+            await waitUntil(() => dd.dl && dd.dl.id === 'DLVIDEO0004' && fs.existsSync(path.join(vdir('DLVIDEO0004'), 'index.bin')));
+            const started = has(/^download DLVIDEO0004: started$/);
+                        send({ cmd: 'play', id: 'DLVIDEO0001', rect: '1280x720' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            assert.ok(!dd.dl && has(/^download DLVIDEO0004: stopped$/) === 1, 'stopped for the play');
+            send({ cmd: 'pause' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+            await sleep(400);
+            assert.ok(!dd.dl, 'not while playing or paused');
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            await waitUntil(() => has(/^download DLVIDEO0004: started$/) === started + 1);
+            assert.strictEqual(item('DLVIDEO0004').ready, false, 'the cut one never counts');
+            fs.writeFileSync(dctl, 'done');
+            await ready('DLVIDEO0004');
+        });
+
+        await t('downloads: the cleanup after a play, the LRU and the thumbs\' cap never delete one; remove deletes its files, thumb and marker', async () => {
+            mkdirp(vdir('PLAYEDVID01'));
+            ['meta.json', 'audio.m4a', 'index.bin', 'video.h264'].forEach((f) => fs.writeFileSync(path.join(vdir('PLAYEDVID01'), f), '{}'));
+                        send({ cmd: 'play', id: 'PLAYEDVID01', rect: '1280x720' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            assert.ok(!fs.existsSync(vdir('PLAYEDVID01')), 'a played video goes once stopped');
+            dd.prune();
+            assert.ok(['DLVIDEO0001', 'DLVIDEO0002', 'DLVIDEO0003', 'DLVIDEO0004'].every((id) => isPlayable(vdir(id))), 'the downloads stay');
+            assert.deepStrictEqual(pruneCache(dcache, 0, [], () => {}, undefined, ['DLVIDEO0001', 'DLVIDEO0002', 'DLVIDEO0003', 'DLVIDEO0004']), [], 'pruneCache skips the saved ones');
+            const tdir = path.join(dcache, 'thumbs'), old = new Date(Date.now() - 86400000);
+            fs.utimesSync(path.join(tdir, 'DLVIDEO0001.rgba'), old, old);   // the oldest of all
+            for (let i = 0; i < 160; i++) fs.writeFileSync(path.join(tdir, 'X' + i + '.rgba'), '');
+            dd.pruneThumbs(tdir);
+            assert.ok(fs.existsSync(path.join(tdir, 'DLVIDEO0001.rgba')), 'a download\'s thumb outlives the cap');
+            assert.strictEqual(fs.readdirSync(tdir).filter((n) => /^X/.test(n)).length, 150, 'the others capped at 150, the downloads\' besides');
+                        send({ cmd: 'remove', id: 'DLVIDEO0002' });
+            const it = await lib((x) => !x.some((y) => y.id === 'DLVIDEO0002'));
+            assert.deepStrictEqual(it.map((x) => x.id), ['DLVIDEO0004', 'DLVIDEO0003', 'DLVIDEO0001']);
+            assert.ok(!fs.existsSync(vdir('DLVIDEO0002')) && !fs.existsSync(path.join(tdir, 'DLVIDEO0002.rgba')) && !fs.existsSync(path.join(dcache, 'saved', 'DLVIDEO0002')));
+            // removed while being fetched: the fetch stops, its folder goes
+            fs.writeFileSync(dctl, '');
+            send({ cmd: 'download', id: 'DLVIDEO0005' });
+            await waitUntil(() => dd.dl && dd.dl.id === 'DLVIDEO0005' && fs.existsSync(vdir('DLVIDEO0005')));
+            send({ cmd: 'remove', id: 'DLVIDEO0005' });
+            await lib((x) => !x.some((y) => y.id === 'DLVIDEO0005'));
+            assert.ok(!dd.dl && !fs.existsSync(vdir('DLVIDEO0005')));
+        });
+
+        await t('downloads: a failing one is tried 3 times (a refused video once), then kept as failed with no files; asked again, tried again', async () => {
+            fs.writeFileSync(dctl, 'fail');
+            send({ cmd: 'download', id: 'DLVIDEO0006' });
+            await lib((x) => x.some((y) => y.id === 'DLVIDEO0006' && y.error === 'download failed'));
+            assert.strictEqual(has(/^download DLVIDEO0006: boom \(\d\/3\)/), 3);
+            assert.ok(!fs.existsSync(vdir('DLVIDEO0006')), 'no half files left');
+            assert.strictEqual(marker('DLVIDEO0006').failed, true, 'kept as failed: a reboot does not retry it');
+            fs.writeFileSync(dctl, 'gone');
+            send({ cmd: 'download', id: 'DLVIDEO0007' });
+            await lib((x) => x.some((y) => y.id === 'DLVIDEO0007' && y.error === 'download failed'));
+            assert.ok(has(/^download DLVIDEO0007: Video unavailable \(1\/3\), given up$/) === 1, 'refused: given up at once');
+            fs.writeFileSync(dctl, 'done');
+            send({ cmd: 'download', id: 'DLVIDEO0006' });
+            await ready('DLVIDEO0006');
+            assert.strictEqual(marker('DLVIDEO0006').failed, undefined);
+            send({ cmd: 'remove', id: 'DLVIDEO0007' });
+            await lib((x) => !x.some((y) => y.id === 'DLVIDEO0007'));
+        });
+
+        await t('downloads: offline none starts; one failing for the network is not counted and waits a minute; "webpage" is no age check', async () => {
+            fs.unlinkSync(lease);
+            fs.writeFileSync(dctl, 'done');
+            send({ cmd: 'download', id: 'NETVIDEO001' });
+            await sleep(400);
+            assert.ok(!dd.dl && has(/^download NETVIDEO001: started$/) === 0, 'no lease: not started');
+            fs.writeFileSync(dctl, 'err:ERROR: [youtube] NETVIDEO001: Unable to download API page: <urlopen error [Errno -3] Temporary failure in name resolution>');
+            fs.writeFileSync(lease, JSON.stringify({ interface: 'wlan0' }));
+            await waitUntil(() => has(/^download NETVIDEO001: .*name resolution> - the network, again in 60 s$/) === 1);
+            await sleep(400);
+            assert.strictEqual(has(/^download NETVIDEO001: started$/), 1, 'waits before trying again');
+            assert.ok(!item('NETVIDEO001').error && !marker('NETVIDEO001').failed && !dd.dlFails.NETVIDEO001, 'not counted');
+            fs.writeFileSync(dctl, 'err:ERROR: [youtube] NETVIDEO001: Unable to download webpage: HTTP Error 429: Too Many Requests');
+            dd.dlNetAt = 0;
+            await lib((x) => x.some((y) => y.id === 'NETVIDEO001' && y.error === 'download failed'));
+            assert.strictEqual(has(/^download NETVIDEO001: .*HTTP Error 429: Too Many Requests \(1\/3\)$/), 1, 'counted, tried 3 times: not given up as an age check');
+            send({ cmd: 'remove', id: 'NETVIDEO001' });
+            await lib((x) => !x.some((y) => y.id === 'NETVIDEO001'));
+        });
+
+        await t('downloads: after a reboot a cut one (.part files) is fetched again from scratch; done ones stay ready', async () => {
+            dc.destroy();
+            await dd.close();
+            dd.writeSaved('DLVIDEO0008', { title: 'Eight', at: Date.now() });
+            mkdirp(vdir('DLVIDEO0008'));
+            ['audio.m4a', 'index.bin', 'video.h264.part'].forEach((f) => fs.writeFileSync(path.join(vdir('DLVIDEO0008'), f), 'x'));
+            assert.ok(!isPlayable(vdir('DLVIDEO0008')));
+            fs.writeFileSync(dctl, 'done');
+            const n = has(/^download DLVIDEO0008: started$/);
+            dd = mk();
+            await dd.start();
+            dc = await client(dd.opts.sock);
+            send({ cmd: 'library' });
+            await ready('DLVIDEO0008');
+            assert.strictEqual(has(/^download DLVIDEO0008: started$/), n + 1, 'once: the closed daemon starts none');
+            assert.ok(['DLVIDEO0001', 'DLVIDEO0003', 'DLVIDEO0004', 'DLVIDEO0006'].every((id) => item(id).ready));
+        });
+
+        await t('downloads: a marker that cannot be read is still a download: kept by a quality change, its failures counted', async () => {
+            const mf = path.join(dcache, 'saved', 'DLVIDEO0001'), keep = fs.readFileSync(mf);
+            fs.writeFileSync(mf, '{"title":');   // cut short
+            send({ cmd: 'play', id: 'DLVIDEO0001', rect: '1280x720' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            try { fs.unlinkSync(dctl + '.log'); } catch (e) { /* none */ }
+            send({ cmd: 'quality', quality: '360' });
+            await sleep(400);
+            assert.ok(!fs.existsSync(dctl + '.log') && dd.state === 'playing' && isPlayable(vdir('DLVIDEO0001')), 'no refetch of a download');
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            assert.ok(isPlayable(vdir('DLVIDEO0001')), 'kept after its play');
+            fs.writeFileSync(mf, keep);
+            fs.writeFileSync(dctl, 'fail');
+            dd.writeSaved('BADMARKER01', { at: Date.now() });
+            fs.writeFileSync(path.join(dcache, 'saved', 'BADMARKER01'), '{"at":');
+            await waitUntil(() => has(/^download BADMARKER01: boom \(3\/3\), given up$/) === 1, 5000);
+            await sleep(300);
+            assert.strictEqual(has(/^download BADMARKER01: started$/), 3, 'tried 3 times, not in a loop');
+            send({ cmd: 'remove', id: 'BADMARKER01' });
+            await lib((x) => !x.some((y) => y.id === 'BADMARKER01'));
+        });
+
+        await t('downloads: saved/ unreadable: the cleanup deletes nothing', async () => {
+            const c2 = path.join(droot, 'cache-bad'), x = new Daemon({ cacheDir: c2, keep: 0, noSetuid: true, log: () => {} });
+            mkdirp(path.join(c2, 'SOMEVIDEO01'));
+            fs.writeFileSync(path.join(c2, 'SOMEVIDEO01', 'audio.m4a'), 'x');
+            fs.writeFileSync(path.join(c2, 'saved'), 'not a folder');   // readdir: ENOTDIR
+            assert.deepStrictEqual(x.prune(), []);
+            assert.ok(fs.existsSync(path.join(c2, 'SOMEVIDEO01', 'audio.m4a')), 'kept');
+            fs.unlinkSync(path.join(c2, 'saved'));   // none at all (ENOENT): no downloads, the LRU as before
+            assert.deepStrictEqual(x.prune(), ['SOMEVIDEO01']);
+        });
+
+        await t('offline: a download plays from its files with no network and no fetch; a failed play says offline', async () => {
+            const opts = { ytRequest: dd.opts.ytRequest, fetcher: dd.opts.fetcher }, nf = path.join(droot, 'nofetch.ctl');
+            try { fs.unlinkSync(lease); } catch (e) { /* none */ }
+            dd.opts.ytRequest = () => Promise.reject(new Error('getaddrinfo EAI_AGAIN www.youtube.com'));
+            dd.opts.fetcher = [process.execPath, path.join(__dirname, 'fake_ytfetch.js'), nf];
+            fs.writeFileSync(nf, 'fail');
+                        send({ cmd: 'play', id: 'DLVIDEO0003', rect: '1280x720' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            assert.ok(!fs.existsSync(nf + '.log'), 'no fetcher: no yt-dlp');
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            assert.ok(isPlayable(vdir('DLVIDEO0003')), 'still there after its play');
+            send({ cmd: 'play', id: 'NOTONCAR001', rect: '1280x720' });
+            const e = await dc.waitFor((x) => x.ev === 'error' && /boom/.test(x.msg));
+            assert.strictEqual(e.offline, true, 'no lease: offline');
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'error');
+            fs.writeFileSync(lease, JSON.stringify({ interface: 'wlan0' }));
+            fs.writeFileSync(nf, 'gone');
+                        send({ cmd: 'play', id: 'NOTONCAR001', rect: '1280x720' });
+            const e2 = await dc.waitFor((x) => x.ev === 'error' && /unavailable/.test(x.msg));
+            assert.strictEqual(e2.offline, undefined, 'online, a refused video: not offline');
+            Object.assign(dd.opts, opts);
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+        });
+
+        await t('VP9 + downloads: offline, a download that ytdec cannot decode stays (audio only, no refetch); H.264 only: downloads fetch --avc1', async () => {
+            fs.writeFileSync(dctl, 'done'); setMode('ok');
+            fs.unlinkSync(lease);
+            send({ cmd: 'play', id: 'DLVIDEO0003', rect: '1280x720' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            await waitUntil(() => dd.child);
+            try { fs.unlinkSync(dctl + '.log'); } catch (e) { /* none */ }
+            setMode('codec');
+            dd.child.kill('SIGKILL');                       // the next ytdec: exit 4
+            await dc.waitFor((x) => x.ev === 'error' && x.msg === 'video failed, audio only', 4000);
+            assert.ok(isPlayable(vdir('DLVIDEO0003')) && !fs.existsSync(dctl + '.log'), 'the download kept, no fetch');
+            assert.ok(dd.avc1Only);
+            setMode('ok');
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            fs.writeFileSync(lease, JSON.stringify({ interface: 'wlan0' }));
+            send({ cmd: 'download', id: 'DLVIDEO0009', meta: { title: 'Nine' } });
+            await ready('DLVIDEO0009');
+            assert.ok(JSON.parse(fs.readFileSync(dctl + '.log', 'utf8')).argv.indexOf('--avc1') > 0, 'H.264 only from then on');
+            send({ cmd: 'remove', id: 'DLVIDEO0009' });
+            await lib((it) => !it.some((x) => x.id === 'DLVIDEO0009'));
+            noAvc1(dd); dd.codecRetry = null;
+        });
+
+        await t('VP9 + downloads: online, a download that ytdec cannot decode is fetched again as H.264 and stays a download', async () => {
+            fs.writeFileSync(dctl, 'done'); setMode('ok');
+            send({ cmd: 'play', id: 'DLVIDEO0004', rect: '1280x720' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            await waitUntil(() => dd.child);
+            try { fs.unlinkSync(dctl + '.log'); } catch (e) { /* none */ }
+            setMode('codec');
+            dd.child.kill('SIGKILL');
+            await waitUntil(() => fs.existsSync(dctl + '.log'), 4000);
+            setMode('ok');
+            assert.ok(JSON.parse(fs.readFileSync(dctl + '.log', 'utf8')).argv.indexOf('--avc1') > 0, 'fetched again as H.264');
+            await waitUntil(() => isPlayable(vdir('DLVIDEO0004')) && dd.state === 'playing', 4000);
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            assert.ok(isPlayable(vdir('DLVIDEO0004')) && fs.existsSync(path.join(dcache, 'saved', 'DLVIDEO0004')), 'still a download');
+            assert.strictEqual(item('DLVIDEO0004').ready, true);
+            noAvc1(dd); dd.codecRetry = null;
+        });
+
+        await t('downloads: Download on the video playing: its own fetch fills the folder (no second fetch), kept after stop', async () => {
+            fs.writeFileSync(dctl, 'done');
+            send({ cmd: 'play', id: 'PLAYNSAVE01', rect: '1280x720' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            send({ cmd: 'download', id: 'PLAYNSAVE01', meta: { title: 'Now' } });
+            await ready('PLAYNSAVE01');
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            await sleep(300);
+            assert.ok(isPlayable(vdir('PLAYNSAVE01')) && has(/^download PLAYNSAVE01: started$/) === 0, 'kept, never fetched twice');
+        });
+
+        await t('downloads: the one downloading played: the download stops, the play fetches it from scratch, and that makes it ready', async () => {
+            fs.writeFileSync(dctl, '');
+            send({ cmd: 'download', id: 'PLAYDLING01' });
+            await waitUntil(() => dd.dl && dd.dl.id === 'PLAYDLING01' && fs.existsSync(path.join(vdir('PLAYDLING01'), 'index.bin')));
+            send({ cmd: 'play', id: 'PLAYDLING01', rect: '1280x720' });
+            await waitUntil(() => has(/^download PLAYDLING01: stopped$/) === 1);
+            fs.writeFileSync(dctl, 'done');
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            await ready('PLAYDLING01');
+            send({ cmd: 'stop' });
+            await dc.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            await sleep(300);
+            assert.ok(isPlayable(vdir('PLAYDLING01')) && has(/^download PLAYDLING01: started$/) === 1, 'ready from the play, not started again');
+        });
+
+        await t('auto-downloads: off by default; on, the N newest Subscriptions videos on Wi-Fi while signed in; never on phone data or offline', async () => {
+            assert.strictEqual(dd.autoMax(), 0, 'off by default (no state file)');
+            const SUBS = { contents: { tvBrowseRenderer: { content: { tvSurfaceContentRenderer: { content: { sectionListRenderer: { contents: [
+                { shelfRenderer: { content: { horizontalListRenderer: { items: [
+                    tile('SHORTVIDEO1', 'TILE_CONTENT_TYPE_SHORTS', 'A short', 'A', null),
+                    tile('WATCHEDVID1', 'TILE_CONTENT_TYPE_VIDEO', 'Seen', 'A', '10:00'),
+                    tile('LIVEVIDEO01', 'TILE_CONTENT_TYPE_VIDEO', 'Live', 'A', 'LIVE'),
+                    tile('LONGVIDEO01', 'TILE_CONTENT_TYPE_VIDEO', 'Long', 'A', '1:30:00'),
+                    tile('AUTOVIDEO01', 'TILE_CONTENT_TYPE_VIDEO', 'New 1', 'A', '10:00'),
+                    tile('AUTOVIDEO02', 'TILE_CONTENT_TYPE_VIDEO', 'New 2', 'B', '5:00'),
+                    tile('AUTOVIDEO03', 'TILE_CONTENT_TYPE_VIDEO', 'New 3', 'C', '5:00')] } } } }] } } } } } } };
+            let browsed = 0;
+            dd.account.status = () => ({ state: 'signed_in' });
+            dd.account.token = async () => 'TOKEN';
+            dd.account.browse = async (id) => { browsed++; assert.strictEqual(id, 'FEsubscriptions'); return { status: 200, j: SUBS }; };
+            dd.positions().WATCHEDVID1 = { ms: 600000, total: 600000, done: true, at: Date.now() };
+            fs.writeFileSync(dctl, 'done');
+            await sleep(300);
+            assert.strictEqual(browsed, 0, 'off: Subscriptions never read');
+            fs.writeFileSync(lease, JSON.stringify({ interface: 'usb0' }));   // the phone's data
+                        send({ cmd: 'auto_download', max: 2 });
+            assert.deepStrictEqual(await dc.waitFor((x) => x.ev === 'auto_download'), { ev: 'auto_download', max: 2 });
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dstate, 'autodl.json'), 'utf8')), { max: 2 }, 'kept for the next start');
+            await sleep(300);
+            assert.strictEqual(browsed, 0, 'phone data: never');
+            fs.unlinkSync(lease);
+            await sleep(300);
+            assert.strictEqual(browsed, 0, 'no lease: never');
+            dd.account.status = () => ({ state: 'signed_out' });
+            fs.writeFileSync(lease, JSON.stringify({ interface: 'wlan0' }));
+            await sleep(300);
+            assert.strictEqual(browsed, 0, 'signed out: never');
+            dd.account.status = () => ({ state: 'signed_in' });
+            await ready('AUTOVIDEO02');
+            assert.strictEqual(browsed, 1);
+            let it = await lib((x) => x.filter((y) => y.auto && y.ready).length === 2);
+            assert.deepStrictEqual(it.filter((x) => x.auto).map((x) => x.id), ['AUTOVIDEO01', 'AUTOVIDEO02'], 'the 2 newest that qualify, newest first');
+            await sleep(300);
+            assert.strictEqual(browsed, 1, 'looked for again only after autoEveryMs');
+            dd.positions().AUTOVIDEO01 = { ms: 600000, total: 600000, done: true, at: Date.now() };
+            it = await lib((x) => !x.some((y) => y.id === 'AUTOVIDEO01'));
+            assert.ok(!fs.existsSync(vdir('AUTOVIDEO01')), 'watched: it goes');
+            send({ cmd: 'auto_download', max: 0 });
+            it = await lib((x) => !x.some((y) => y.auto));
+            assert.ok(!fs.existsSync(vdir('AUTOVIDEO02')) && isPlayable(vdir('DLVIDEO0001')), 'off: the auto ones go, the ones asked by hand stay');
+            dd.account.status = () => ({ state: 'signed_out' });
+        });
+
+        await t('auto-downloads: on phone data a queued auto one waits (Wi-Fi only), one asked by hand does not', async () => {
+            dd.autoN = 2;   // (signed out: no Subscriptions look)
+            fs.writeFileSync(lease, JSON.stringify({ interface: 'usb0' }));
+            fs.writeFileSync(dctl, 'done');
+            dd.writeSaved('AUTOVIDEO09', { title: 'Auto', at: Date.now() - 1000, auto: true });   // the older: first in the queue
+            send({ cmd: 'download', id: 'HANDVIDEO01' });
+            await ready('HANDVIDEO01');
+            await sleep(300);
+            assert.strictEqual(has(/^download AUTOVIDEO09: started$/), 0, 'phone data: the auto one waits');
+            fs.writeFileSync(lease, JSON.stringify({ interface: 'wlan0' }));
+            await ready('AUTOVIDEO09');
+            dd.autoN = 0;
+            send({ cmd: 'remove', id: 'HANDVIDEO01' });
+            await lib((x) => !x.some((y) => y.id === 'HANDVIDEO01' || y.id === 'AUTOVIDEO09'));
+        });
+
+        await t('auto-downloads: an empty Subscriptions answer drops none; one removed by hand is not brought back', async () => {
+            const feed = (items) => ({ contents: { tvBrowseRenderer: { content: { tvSurfaceContentRenderer: { content: { sectionListRenderer: { contents: [
+                { shelfRenderer: { content: { horizontalListRenderer: { items: items } } } }] } } } } } } });
+            let ans = feed([]), browsed = 0;
+            dd.account.status = () => ({ state: 'signed_in' });
+            dd.account.browse = async () => { browsed++; return { status: 200, j: ans }; };
+            fs.writeFileSync(dctl, 'done');
+            dd.autoN = 2;
+            dd.writeSaved('AUTOVIDEO10', { title: 'Ten', at: Date.now(), auto: true });
+            dd.autoAt = 0;
+            await waitUntil(() => browsed === 1);
+            await sleep(200);
+            assert.ok(fs.existsSync(path.join(dcache, 'saved', 'AUTOVIDEO10')), 'kept: an empty list is no answer');
+            await ready('AUTOVIDEO10');
+            send({ cmd: 'remove', id: 'AUTOVIDEO10' });
+            await lib((x) => !x.some((y) => y.id === 'AUTOVIDEO10'));
+            ans = feed([tile('AUTOVIDEO10', 'TILE_CONTENT_TYPE_VIDEO', 'Ten', 'A', '5:00')]);
+            dd.autoAt = 0;
+            await waitUntil(() => browsed === 2);
+            await sleep(200);
+            assert.ok(!fs.existsSync(path.join(dcache, 'saved', 'AUTOVIDEO10')), 'removed by hand: stays removed');
+            dd.autoN = 0;
+            dd.account.status = () => ({ state: 'signed_out' });
+        });
+
+        await t('downloads: an id that is not a string is refused (an array of one would pass the pattern)', async () => {
+            for (const cmd of ['download', 'remove', 'play', 'thumb']) {
+                send({ cmd: cmd, id: ['ARRAYVIDEO1'], rect: '1280x720' });
+                await dc.waitFor((x) => x.ev === 'error' && x.msg === 'bad id');
+            }
+            assert.ok(!fs.existsSync(path.join(dcache, 'saved', 'ARRAYVIDEO1')) && dd.state !== 'error');
+        });
+
+        await t('positions: on the head file (audio.m4a came, paused) with no length known, no position is kept', async () => {
+            const x = new Daemon({ cacheDir: path.join(droot, 'cache-pos'), noSetuid: true, log: () => {} });
+            x.cur = { id: 'HEADFILE001', dir: path.join(droot, 'cache-pos', 'HEADFILE001'), title: 'T' };
+            x.total = 60000; x.elapsed = 5000; x.head = null; x.headFile = true;
+            x.savePos(true);
+            assert.strictEqual(x.positions().HEADFILE001, undefined, 'the head\'s 60 s is no length');
+            x.headFile = false;
+            x.savePos(true);
+            assert.strictEqual(x.positions().HEADFILE001.ms, 5000);
+        });
+
+        await t('auto-downloads: one going while it downloads: never pruned under its fetcher, its folder goes once the fetch is gone', async () => {
+            fs.writeFileSync(dctl, '');
+            dd.autoN = 1;
+            dd.writeSaved('AUTOVIDEO11', { title: 'Eleven', at: Date.now(), auto: true });
+            await waitUntil(() => dd.dl && dd.dl.id === 'AUTOVIDEO11' && fs.existsSync(path.join(vdir('AUTOVIDEO11'), 'index.bin')));
+            let exitAt = -1;
+            dd.dl.child.on('exit', () => { exitAt = dlogs.length; });
+            dd.autoN = 0;   // the next tick: over the count, the marker goes, the download stops
+            await waitUntil(() => !fs.existsSync(vdir('AUTOVIDEO11')));
+            const at = dlogs.findIndex((l) => /^lru removed .*AUTOVIDEO11/.test(l));
+            assert.ok(exitAt >= 0 && at >= exitAt, 'pruned after the fetcher exited (' + at + ' vs ' + exitAt + ')');
+            await lib((x) => !x.some((y) => y.id === 'AUTOVIDEO11'));
+        });
+
+        await t('downloads: a log report leaves out the downloads\' ids and titles', async () => {
+            const k = dd.known();
+            assert.ok(k.ids.DLVIDEO0008 === 'v' && k.titles.indexOf('Fetched DLVIDEO0008') >= 0);
+        });
+        dc.destroy();
+        await dd.close();
     }
 
     c.destroy();

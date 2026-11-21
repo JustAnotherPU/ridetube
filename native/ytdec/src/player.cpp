@@ -46,6 +46,13 @@ bool Player::open_inputs(int64_t now)
         if (video_fd_ < 0)
             return false;
     }
+    {
+        std::string err;
+        if (!dec_->set_codec(idx_.codec, &err)) {
+            codec_failed(err);
+            return false;
+        }
+    }
     if (idx_.fps_num && idx_.fps_den)
         dur_ = (int64_t)(1000.0 * idx_.fps_den / idx_.fps_num + 0.5);
     char b[200];
@@ -57,6 +64,17 @@ bool Player::open_inputs(int64_t now)
     if (target_ >= 0)
         seek(target_, now);   /* a seek that came before the files */
     return true;
+}
+
+void Player::codec_failed(const std::string &msg)
+{
+    char c[5] = {(char)idx_.codec, (char)(idx_.codec >> 8), (char)(idx_.codec >> 16), (char)(idx_.codec >> 24), 0};
+    std::string m = std::string("codec '") + c + "': " + msg;
+    for (auto &ch : m)
+        if (ch == '"' || ch == '\\' || (unsigned char)ch < 0x20) ch = '\'';
+    emit_("{\"ev\":\"error\",\"msg\":\"" + m + "\"}");
+    log_(m);
+    fatal = kCodecFailed;
 }
 
 void Player::seek(int64_t ms, int64_t now)
@@ -161,12 +179,17 @@ bool Player::feed_one(int64_t now)
         limit = pos(now) - 2 * dur_;
     const bool picture = max_fed_ >= limit;
     next_++;
+    fed_++;
     std::string err;
     if (!dec_->feed(au_.data(), au_.size(), pts, picture, [&](const woc::VideoFrame &f) { on_frame(f, now); },
                     &err)) {
         if (err != last_err_)
             log_("decode: record " + std::to_string(next_ - 1) + ": " + err);
         last_err_ = err;
+        if (idx_.codec && !decoded)
+            codec_failed("first frame: " + err);
+    } else if (idx_.codec && !decoded && fed_ >= (uint64_t)kCodecProbe) {
+        codec_failed("no frame out of " + std::to_string(fed_) + " records");
     }
     return true;
 }
@@ -193,6 +216,8 @@ int Player::step(int64_t now)
         stats_at_ = now;
     if (now - stats_at_ >= kStatsMs)
         stats(now);
+    if (fatal)
+        return 100;   /* main exits */
     if (!open_inputs(now))
         return 100;
     if (!video_on_)

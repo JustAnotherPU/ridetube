@@ -8,11 +8,13 @@
  * /dev/shm/mgu-video-ridetube for mgu-render, paced by the audio clock from stdin.
  * stdin, one command a line: clock <elapsed_ms> <mono_ms> | pause | resume |
  * seek <ms> | video 0|1 | quit (EOF = quit). stdout: JSON lines, ready,
- * stats every 2 s, eof, error. player.h has the rules.
+ * stats every 2 s, eof, error. player.h has the rules. Exit 4: the index's
+ * codec (VP9) cannot be decoded here (Player::kCodecFailed).
  *
  * A core dump reboots the head unit: dumping is off before anything else,
  * and every fatal signal writes one log line and _exit(70)s. */
 #include "decoder_msdk.h"
+#include "mfx/mfxstructures.h"
 #include "mgvf.h"
 #include "player.h"
 
@@ -125,6 +127,12 @@ public:
         return d.feed(au, len, cb, err, true, picture, pts_ms);
     }
     void flush(const Sink &cb) override { d.flush(cb); }
+    bool set_codec(uint32_t codec, std::string *err) override
+    {
+        if (codec == MFX_CODEC_VP9)
+            return d.use_vp9(err);
+        return VideoDecoder::set_codec(codec, err);
+    }
 };
 
 /* this process's CPU since the last call, % of one core */
@@ -197,6 +205,8 @@ int run(int argc, char **argv)
     std::string inbuf;
     for (;;) {
         const int wait = player.step(mono_ms());
+        if (player.fatal)
+            return player.fatal;   /* the error event and log line are out */
         struct pollfd p = {0, POLLIN, 0};
         if (poll(&p, 1, wait) < 0 && errno != EINTR)
             return fail(std::string("poll: ") + strerror(errno), 1);

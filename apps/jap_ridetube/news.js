@@ -14,6 +14,14 @@ const NOTES = {
         'The knob goes straight from video to video',
         'With Video while driving agreed to, you can type a search while driving',
     ],
+    '0.6': [
+        'Download a video to watch it with no internet: Download in the player',
+        'Library on the rail: your downloads and Continue watching',
+        'Signed out, Home shows Continue watching and your downloads',
+        'Settings can download your newest Subscriptions videos, on Wi-Fi only',
+        'More videos play: VP9 is used when YouTube offers it',
+        'Pausing in the first minute now stops the sound too',
+    ],
 };
 const TITLE = 'What\'s new in RideTube {version}';
 

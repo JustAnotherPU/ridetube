@@ -2,7 +2,7 @@
 
 The video half of RideTube (BMW iDrive 7 MGU, Apollo Lake,
 Intel HD 505). Reads what the car's fetcher (`jap-ridetube-d/ytfetch.py`) writes, decodes H.264
-on the GPU with the unit's Intel Media SDK, scales it with MSDK VPP and writes
+or VP9 (profile 0, through the unit's VP9 decoder plugin) on the GPU with the unit's Intel Media SDK, scales it with MSDK VPP and writes
 I420 frames to mgu-render's video file `/dev/shm/mgu-video-ridetube` (MGVF,
 mgu-render `PROTOCOL.md`, "Video"), paced by the audio clock that `ytd.js`
 sends on stdin.
@@ -38,6 +38,10 @@ ytdec --dir <folder> --rect <W>x<H> [--fill] [--log <file>]
 - `<folder>`: `index.bin` (MGYI) and `video.h264` (Annex-B), or
   `video.h264.part` while it is still being fetched (the rename keeps the
   inode, so the open file follows). Both may grow; ytdec waits for them.
+  The index's u32 at offset 20 is the codec: 0 (every index before VP9, and
+  every H.264 one) = H.264 Annex-B; `"VP9 "` = the same file name holding raw
+  VP9 frames, one index record per frame (a superframe is one record, passed
+  whole), key = a keyframe = a seek and start point.
 - `--rect`: MGVF frame size, default 1280x720; even, 16..2048, `W*H*3` at most
   12 MiB. Fit (letterbox/pillarbox, black bars) by display aspect, filling instead when that crops at most 15 %; `--fill`
   crops the centre instead.
@@ -74,8 +78,23 @@ in it (≈ −8: shown 8 ms ahead); `cpu_pct` this process, % of one core.
 its final name (the fetcher writes no other marker). A `.part` that stops
 growing is a stall (ytd.js shows buffering), never the end. ytdec stays up after `eof` (a `seek` plays again).
 
-Exit codes: 0 quit, 1 decoder init failed, 2 bad arguments / MGVF file, 70
-fatal signal or exception.
+Exit codes: 0 quit, 1 decoder init failed, 2 bad arguments / MGVF file, 4 the
+index's codec cannot be decoded here (an `error` event first: the VP9 plugin
+did not load or register, the first frame failed, or 30 records gave no
+frame; ytd.js then fetches the video again as H.264), 70 fatal signal or
+exception.
+
+VP9: `dlopen("/usr/lib/mediasdk/libmfx_vp9d_hw64.so")` once, then per MSDK
+session `CreatePlugin(a922394d8d87452f878c51f2fc9b4131)`, `GetPluginParam`,
+`MFXVideoUSER_Register(session, Type)`, as the MSDK dispatcher's
+`MFXVideoUSER_Load` does (`Unregister` before `MFXClose`). Checked offline under
+the unit's ld.so on the rootfs copy: `CreatePlugin` and `GetPluginParam` (type
+1 = decode, codec `VP9 `, API 1.24; a VP8 UID is refused); registering it in
+a software (libmfxsw64) session returns `MFX_ERR_UNSUPPORTED`. Registering on
+the GPU, decoding, opaque surfaces into VPP, seeks and superframes are
+car-only. A superframe is fed whole; if the plugin takes only its hidden frame
+and answers MORE_DATA with the rest left in the bitstream, the decoder calls
+it again on the rest.
 
 ## MGVF output
 
@@ -117,6 +136,8 @@ order, timestamps and planes are right.
 
 ## Not done
 
+- VP9 is checked on the unit only (no software VP9 to compare with): mgu-yt's ytdec
+  with this code played a 720p60 VP9 video for 30 s there at ~26 % CPU.
 - The renderer never displayed the file (no app yet).
 - No catch-up seek: a clock far ahead of the video (without `seek`) is caught
   up by decoding without VPP (~450 fps at 720p) rather than jumping.

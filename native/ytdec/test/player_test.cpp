@@ -86,12 +86,15 @@ void write_file(const std::string &p, const std::vector<uint8_t> &b)
     fclose(f);
 }
 
-std::vector<uint8_t> index_bytes(const Stream &s, size_t n)
+const uint32_t kVp9 = 'V' | 'P' << 8 | '9' << 16 | ' ' << 24;   /* MFX_CODEC_VP9 */
+
+std::vector<uint8_t> index_bytes(const Stream &s, size_t n, uint32_t codec = 0)
 {
     std::vector<uint8_t> b = {'M', 'G', 'Y', 'I'};
     put16(b, 1), put16(b, 640), put16(b, 360), put16(b, 30), put16(b, 1);
     put16(b, 0);
     put32(b, (uint32_t)n);
+    put32(b, codec);
     b.resize(32, 0);
     for (size_t i = 0; i < n; i++) {
         const IndexRec &r = s.recs[i];
@@ -142,6 +145,49 @@ public:
     }
 };
 
+/* VP9 frames in display order (no reordering): byte 0 is the frame header,
+ * key 0x80 / inter 0x84 (frame_type bit). mode: ok, fail (every feed), silent. */
+Stream make_vp9(int n)
+{
+    Stream s;
+    for (int f = 0; f < n; f++) {
+        IndexRec r;
+        r.pts_ms = (uint32_t)(f * DUR);
+        r.pos = s.video.size();
+        r.key = f % 12 == 0;
+        const uint8_t fr[] = {(uint8_t)(r.key ? 0x80 : 0x84), (uint8_t)(f >> 8), (uint8_t)f};
+        s.video.insert(s.video.end(), fr, fr + sizeof fr);
+        r.size = sizeof fr;
+        s.recs.push_back(r);
+    }
+    return s;
+}
+
+class Vp9Fake : public VideoDecoder {
+public:
+    std::string mode = "ok";
+    std::vector<uint8_t> y = std::vector<uint8_t>(W * H, 16), uv = std::vector<uint8_t>(W * H / 2, 128);
+    bool started = false;
+    int fed = 0;
+    uint32_t codec = 0;
+    bool set_codec(uint32_t c, std::string *) override { codec = c; return c == kVp9; }
+    bool feed(const uint8_t *au, size_t, int64_t pts, bool picture, const Sink &cb, std::string *err) override
+    {
+        fed++;
+        if (mode == "fail") {
+            *err = "MFXVideoDECODE_DecodeHeader: MFX_ERR_UNSUPPORTED (-3)";
+            return false;
+        }
+        started = started || au[0] == 0x80;
+        if (mode == "silent" || !started)
+            return true;
+        woc::VideoFrame f = {W, H, 0, pts, picture ? y.data() : nullptr, picture ? uv.data() : nullptr, W};
+        cb(f);
+        return true;
+    }
+    void flush(const Sink &) override { started = false; }
+};
+
 struct Rig {
     std::string dir;
     Mgvf out;
@@ -151,12 +197,12 @@ struct Rig {
     int64_t now = 1000000;
     std::vector<int64_t> shown_pts;
 
-    explicit Rig(const std::string &d) : dir(d)
+    explicit Rig(const std::string &d, VideoDecoder *other = nullptr) : dir(d)
     {
         std::string err, warn;
         bool ok = out.open((d + "/shm").c_str(), W, H, 3, &err, &warn);
         assert(ok);
-        p = new Player(d, &dec, &out, [this](const std::string &j) { events.push_back(j); },
+        p = new Player(d, other ? other : &dec, &out, [this](const std::string &j) { events.push_back(j); },
                        [](const std::string &) {}, [] { return 0.0; });
     }
     ~Rig() { delete p; }
@@ -334,6 +380,56 @@ void test_eof_no_rename(const std::string &d, const Stream &s)
     printf("  no eof while .part, eof after the rename ok\n");
 }
 
+/* a VP9 index (codec "VP9 "): keyframes are seek points without any SPS; a
+ * decoder that refuses the codec, fails its first frame or puts out nothing
+ * makes the player fatal (exit 4) */
+void test_vp9()
+{
+    const Stream s = make_vp9(300);
+    std::string d = tmpdir();
+    write_file(d + "/video.h264", s.video);
+    write_file(d + "/index.bin", index_bytes(s, s.recs.size(), kVp9));
+    {
+        Index idx;
+        std::string err;
+        assert(idx.open(d + "/index.bin", &err) && idx.codec == kVp9);
+        int vfd = open((d + "/video.h264").c_str(), O_RDONLY);
+        assert(idx.recs[idx.seek_point(13 * DUR, vfd)].pts_ms == 12 * DUR);
+        close(vfd);
+    }
+    {
+        Rig r(d);   /* the H.264-only fake: refuses VP9, nothing fed */
+        r.run(300);
+        assert(r.p->fatal == Player::kCodecFailed && r.count("error") == 1 && r.count("ready") == 0 && r.dec.fed == 0);
+    }
+    {
+        Vp9Fake v;
+        Rig r(d, &v);
+        r.run(300);
+        assert(v.codec == kVp9 && r.p->fatal == 0 && r.p->shown == 1 && r.p->last_shown_pts == 0);
+        r.clock(0);
+        r.run(1000);
+        assert(r.p->fatal == 0 && r.p->dropped == 0 && r.p->shown >= 30);
+        r.cmd("pause");
+        r.cmd("seek 5000");   /* frame 151: from key 144 */
+        r.run(300);
+        assert(r.p->last_shown_pts >= 5000 && r.p->last_shown_pts < 5000 + DUR);
+        r.cmd("resume");
+        r.run(12000);
+        assert(r.count("eof") == 1 && r.p->last_shown_pts == 299 * DUR && r.p->fatal == 0);
+    }
+    for (const char *mode : {"fail", "silent"}) {
+        Vp9Fake v;
+        v.mode = mode;
+        Rig r(d, &v);
+        r.clock(0);
+        r.run(2000);
+        assert(r.p->fatal == Player::kCodecFailed && r.count("error") == 1);
+        assert(v.fed == (v.mode == "fail" ? 1 : Player::kCodecProbe));
+    }
+    printf("  vp9 index, seek and codec failure ok\n");
+}
+
 }  // namespace
 
 int main()
@@ -349,6 +445,7 @@ int main()
     }
     test_tail(tmpdir(), s);
     test_eof_no_rename(tmpdir(), s);
+    test_vp9();
     printf("player_test: all passed\n");
     return 0;
 }

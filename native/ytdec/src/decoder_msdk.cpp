@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Robert Nisipeanu
-// Modified 2026-11 by JustAnotherPU for RideTube (GPL-3.0 section 5(a)): frames in display order with their timestamps, VPP fit/fill into the output size, NV12 planes out.
+// Modified 2026-11 by JustAnotherPU for RideTube (GPL-3.0 section 5(a)): frames in display order with their timestamps, VPP fit/fill into the output size, NV12 planes out, VP9 through the unit's MSDK VP9 plugin.
 // From github.com/robertnisipeanu/idrive-apps, native/waze-on-cluster/src/decoder_msdk.cpp.
 #include "decoder_msdk.h"
 #include "nal_reader.h"
 
+#include "mfx/mfxplugin.h"
 #include "mfx/mfxvideo.h"
+
+#include <dlfcn.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -84,6 +87,13 @@ mfxU16 even(double v) { return (mfxU16)((uint32_t)(v + 0.5) & ~1u); }
 
 const mfxU64 kNoTimeStamp = (mfxU64)-1;   /* MFX_TIMESTAMP_UNKNOWN */
 
+const char kVp9Plugin[] = "/usr/lib/mediasdk/libmfx_vp9d_hw64.so";   /* plugins.cfg's Path */
+
+/* VP9 uncompressed header, profiles 0-2: frame_marker 2, then profile bits,
+ * show_existing_frame, frame_type (0 = key). A superframe starts with its
+ * first frame's header. */
+bool vp9_key(const uint8_t *p, size_t n) { return n && (p[0] & 0xc0) == 0x80 && !(p[0] & 0x0c); }
+
 int64_t ts_ms(mfxU64 ts) { return ts == kNoTimeStamp ? -1 : (int64_t)(ts / 90); }
 
 void wrap(mfxBitstream *bs, const AccessUnit &au, int64_t pts_ms = -1)
@@ -112,6 +122,14 @@ struct Decoder::State {
     int failed = 0;                  /* access units in a row that failed to decode */
     bool picture = true;             /* this call's frames get an atlas */
 
+    /* VP9: the plugin's CreatePlugin (dlopen'd once, never closed), and the
+     * instance registered in the open session (a new one per session: the
+     * session's close frees it). */
+    mfxCreatePluginFn create_plugin = nullptr;
+    mfxPlugin plugin;
+    mfxPluginParam plugin_param;
+    bool registered = false;
+
     /* The current sequence; valid while `running`. */
     bool running = false;
     mfxVideoParam dec, vpp;
@@ -128,6 +146,7 @@ struct Decoder::State {
 
     ~State();
     bool open_session();
+    bool register_vp9();
     void access_unit(const AccessUnit &au, const FrameSink &cb);
     bool start(const AccessUnit &au);
     void stop();
@@ -180,6 +199,37 @@ bool Decoder::State::open_session()
         session = nullptr;
         return fail(mfx_error("MFXVideoCORE_SetHandle", sts));
     }
+    if (create_plugin && !register_vp9()) {
+        MFXClose(session);
+        session = nullptr;
+        return false;
+    }
+    return true;
+}
+
+/* The dispatcher's PluginCtx::Load (MediaSDK api/mfx_dispatch/linux/mfxloader.cpp)
+ * after its dlopen: CreatePlugin, GetPluginParam, MFXVideoUSER_Register with
+ * the plugin's own type. Registered after SetHandle: the plugin shares the
+ * session's core, which then has the VA display. */
+bool Decoder::State::register_vp9()
+{
+    memset(&plugin, 0, sizeof plugin);
+    memset(&plugin_param, 0, sizeof plugin_param);
+    mfxStatus sts = create_plugin(MFX_PLUGINID_VP9D_HW, &plugin);
+    if (sts != MFX_ERR_NONE)
+        return fail(mfx_error("VP9 plugin CreatePlugin", sts));
+    if (!plugin.GetPluginParam)
+        return fail("VP9 plugin: no GetPluginParam");
+    sts = plugin.GetPluginParam(plugin.pthis, &plugin_param);
+    if (sts != MFX_ERR_NONE)
+        return fail(mfx_error("VP9 plugin GetPluginParam", sts));
+    if (plugin_param.Type != MFX_PLUGINTYPE_VIDEO_DECODE || plugin_param.CodecId != MFX_CODEC_VP9)
+        return fail("VP9 plugin: type " + std::to_string(plugin_param.Type) + " codec " +
+                    std::to_string(plugin_param.CodecId) + ", not a VP9 decoder");
+    sts = MFXVideoUSER_Register(session, plugin_param.Type, &plugin);
+    if (sts != MFX_ERR_NONE)
+        return fail(mfx_error("MFXVideoUSER_Register (VP9)", sts));
+    registered = true;
     return true;
 }
 
@@ -235,7 +285,7 @@ bool Decoder::State::start(const AccessUnit &au)
     mfxBitstream bs;
     wrap(&bs, au);
     memset(&dec, 0, sizeof dec);
-    dec.mfx.CodecId = MFX_CODEC_AVC;
+    dec.mfx.CodecId = create_plugin ? MFX_CODEC_VP9 : MFX_CODEC_AVC;
     mfxStatus sts = MFXVideoDECODE_DecodeHeader(session, &bs, &dec);
     if (sts == MFX_ERR_MORE_DATA)
         return true;   /* SPS without its PPS: wait for the next SPS */
@@ -371,6 +421,10 @@ void Decoder::State::stop()
         MFXVideoVPP_Close(session);
         running = false;
     }
+    if (registered) {
+        MFXVideoUSER_Unregister(session, plugin_param.Type);
+        registered = false;
+    }
     if (session) {
         MFXClose(session);
         session = nullptr;
@@ -398,6 +452,7 @@ Decoder::State::Result Decoder::State::decode(mfxBitstream *bs, const FrameSink 
         }
         mfxFrameSurface1 *out = nullptr;
         mfxSyncPoint sync = nullptr;
+        const mfxU32 off = bs ? bs->DataOffset : 0;
         mfxStatus sts = MFXVideoDECODE_DecodeFrameAsync(session, bs, work, &out, &sync);
         if (sts == MFX_WRN_DEVICE_BUSY) {
             if (++busy > kBusyRetries) {
@@ -408,8 +463,12 @@ Decoder::State::Result Decoder::State::decode(mfxBitstream *bs, const FrameSink 
             continue;
         }
         busy = 0;
-        if (sts == MFX_ERR_MORE_DATA)
+        if (sts == MFX_ERR_MORE_DATA) {
+            /* VP9: a superframe's hidden frame taken, the shown one still in bs (inferred: not seen offline) */
+            if (create_plugin && bs && bs->DataLength && bs->DataOffset > off)
+                continue;
             return Ok;
+        }
         if (sts == MFX_ERR_INCOMPATIBLE_VIDEO_PARAM && bs)
             return Restart;
         if (sts < MFX_ERR_NONE && sts != MFX_ERR_MORE_SURFACE) {
@@ -536,7 +595,12 @@ bool Decoder::feed(const uint8_t *data, size_t len, const FrameSink &cb, std::st
     s.error.clear();
     s.picture = picture;
     s.pts_ms = pts_ms;
-    s.nal.push(data, len, end_of_au, [&](const AccessUnit &au) { s.access_unit(au, cb); });
+    if (s.create_plugin) {
+        const bool key = vp9_key(data, len);
+        s.access_unit(AccessUnit{data, len, key, key, false}, cb);
+    } else {
+        s.nal.push(data, len, end_of_au, [&](const AccessUnit &au) { s.access_unit(au, cb); });
+    }
     if (!s.error.empty()) {
         *err = s.error;
         return false;
@@ -560,5 +624,36 @@ void Decoder::flush(const FrameSink &cb)
 void Decoder::shutdown() { s_.reset(); }
 
 bool Decoder::decoding() const { return s_ && s_->running; }
+
+bool Decoder::use_vp9(std::string *err)
+{
+    if (!s_) {
+        *err = "decoder not initialised";
+        return false;
+    }
+    State &s = *s_;
+    if (s.create_plugin)
+        return true;
+    void *dl = dlopen(kVp9Plugin, RTLD_NOW | RTLD_LOCAL);
+    if (!dl) {
+        const char *e = dlerror();
+        *err = std::string("dlopen ") + kVp9Plugin + ": " + (e ? e : "failed");
+        return false;
+    }
+    s.create_plugin = (mfxCreatePluginFn)dlsym(dl, "CreatePlugin");
+    if (!s.create_plugin) {
+        *err = std::string(kVp9Plugin) + ": no CreatePlugin";
+        return false;
+    }
+    /* init() opened a session already: register now, so a refusing plugin
+     * shows before the first frame. */
+    s.error.clear();
+    if (s.session && !s.running && !s.register_vp9()) {
+        *err = s.error;
+        s.stop();
+        return false;
+    }
+    return true;
+}
 
 }  // namespace woc

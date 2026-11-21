@@ -8,7 +8,9 @@
  *                         send_logs{app}: the service's recent log, redacted, to the developer
  *                         hello{app,lang,region?}: on connect, after the rest; the service's caps come back
  *                         health (cap health), related{id} (cap related)
- *          Daemon -> app: (a played video is deleted from the car once stopped; nothing is kept for offline)
+ *                         library, download{id,meta,quality}, remove{id}, auto_download{max} (cap download)
+ *          Daemon -> app: (a played video is deleted from the car once stopped; a download stays until removed and
+ *                         plays with no network)
  *                         results{q,items:[{id,title,channel,duration_s,meta?}]} thumb{id,w,h,rgba(base64)}: 160x90 or 320x180
  *                         state{state:idle|preparing|playing|paused|ended|error,pct,id,title} time{elapsed,total} error{msg}
  *                         auth{state:signed_out|code|signed_in|error,code,url,expires,msg}
@@ -24,6 +26,8 @@
  *                         hello's clock "2026-10-13", then clock{clock|null}: the head unit's clock is wrong and the
  *                         service skips the certificate dates (main.js warns the driver); an older service: never
  *                         health{key,ok,text} per check, then health{done:true}; related{id,items|error}
+ *                         library{items:[{id,title,channel,duration_s,ready,pct?,error?,auto?}]}: the downloads, newest
+ *                         first, on every change; auto_download{max}; error{msg,offline:true}: a play failed with no network
  *                         a tile may carry short:true (a Short: shown only with the Show Shorts setting)
  *          Thumbs are asked lazily (Model.wantThumb, from the screens' draw path): only for the tiles drawn.
  *          The daemon signs in itself (TV device sign-in) and keeps the tokens; none come here.
@@ -136,6 +140,9 @@ class Model {
         this.resumed = null;         // {id, ms, until}: "Resumed at 12:34 · Start over" shows until then
         this.ytdlpAuto = true;       // the yt-dlp updates setting, told to the daemon on every connect
         this.ytdlp = null;           // the daemon's {auto, version, bundled, checking}; {unsupported: true} from an older one
+        this.library = [];           // the downloads (cap download): [{id, title, channel, duration_s, ready, pct?, error?, auto?}]
+        this.autoDl = 0;             // the auto-download setting (0: off), told to the daemon on every connect
+        this.errorOffline = false;   // the last play error came with no network
         this.rev = 0;                // bumped on every change the screens show
     }
     active() { return ACTIVE.indexOf(this.state) >= 0; }
@@ -156,7 +163,7 @@ class Model {
     setConnected(on) {
         this.connected = on;
         if (on) { this.send(Object.assign({ cmd: 'hello' }, this.hi)); this.send({ cmd: 'status' }); this.send({ cmd: 'auth_status' }); this.send({ cmd: 'positions' }); this.videoOn = null; this._video(); } else {
-            this.caps = []; this.clock = null;
+            this.caps = []; this.clock = null; this.library = [];
             this.searching = false; this.state = 'idle'; this.pending.clear();
             this.auth = { state: 'unknown', code: null, url: null, msg: null };
             Object.keys(this.feeds).forEach((w) => { this.feeds[w].loading = false; });
@@ -267,6 +274,7 @@ class Model {
             this.caps = Array.isArray(m.caps) ? m.caps.filter((x) => typeof x === 'string') : [];
             this.ev_clock(m);
             if (this.can('ytdlp')) this.send({ cmd: 'ytdlp', auto: this.ytdlpAuto });   // the setting, once the service says it has it
+            if (this.can('download')) { this.send({ cmd: 'library' }); this.send({ cmd: 'auto_download', max: this.autoDl }); }
         } else if (m.ev === 'time') {
             if (typeof m.elapsed === 'number') this.elapsed = m.elapsed;
             if (typeof m.total === 'number') this.total = m.total;
@@ -292,6 +300,7 @@ class Model {
                 this._changed(); return;
             }
             this.error = String(m.msg || 'error').replace(/^fetch: /, '');   // the service's stage name means nothing to a driver
+            this.errorOffline = m.offline === true;
             if (this.searching) { this.searching = false; this.searchError = this.error; }
         } else if (typeof this['ev_' + m.ev] === 'function') this['ev_' + m.ev](m);   // events of later packages: an ev_<name> method
         else return;
@@ -303,7 +312,7 @@ class Model {
         if (this.chan) f.push(this.chan);
         if (this.plist) f.push(this.plist);
         if (this.related) f.push(this.related);
-        return this.results.concat(this.resume, ...f.map((x) => x.items || []), ...f.map((x) => [].concat(...(x.shelves || []).map((s) => s.items))));
+        return this.results.concat(this.resume, this.library, ...f.map((x) => x.items || []), ...f.map((x) => [].concat(...(x.shelves || []).map((s) => s.items))));
     }
     /** the videos whose pictures the playlist tiles show */
     _plThumbs() { return ((this.pls && this.pls.items) || []).map((p) => p.thumb).filter(Boolean); }
@@ -536,6 +545,24 @@ class Model {
     }
     /** Start over: from the very start (the service seeks to 1 ms for 0) */
     startOver() { this.resumed = null; return this.skip(-this.elapsed); }
+
+    /* ---------- 0.6.0 (cap download): downloads, kept on the car and played with no network ---------- */
+    ev_library(m) { this.library = valid(m.items, 300); this._prune(); }
+    ev_auto_download(m) { if (m.max >= 0) this.autoDl = m.max; }
+    /** id's download: its library item, or null */
+    saved(id) { return this.library.find((r) => r.id === id) || null; }
+    /** the downloads on the car, ready to play */
+    downloaded() { return this.library.filter((r) => r.ready); }
+    /** download id (its title and channel from the lists) at the quality setting */
+    download(id, quality) {
+        if (!this.can('download') || !isVid(id)) return false;
+        const r = this.item(id) || (id === this.id ? { title: this.title, channel: this.channel } : {});
+        const total = id === this.id && this.total > 0 ? Math.round(this.total / 1000) : null;
+        return this.send(Object.assign({ cmd: 'download', id, meta: { title: r.title || '', channel: r.channel || '', duration_s: r.duration_s || total } }, quality ? { quality } : {}));
+    }
+    remove(id) { return this.can('download') && isVid(id) ? this.send({ cmd: 'remove', id }) : false; }
+    /** the auto-download setting (0, 3, 5, 10): kept for the next connect, told now when connected */
+    setAutoDl(n) { this.autoDl = Number(n) || 0; return this.connected && this.can('download') ? this.send({ cmd: 'auto_download', max: this.autoDl }) : false; }
 }
 
 /** "Élise Atelier" -> "elise atelier": what a channel search compares */

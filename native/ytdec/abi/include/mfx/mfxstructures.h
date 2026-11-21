@@ -181,7 +181,8 @@ enum {
 };
 
 enum {
-    MFX_CODEC_AVC         = MFX_MAKEFOURCC('A','V','C',' ')
+    MFX_CODEC_AVC         = MFX_MAKEFOURCC('A','V','C',' '),
+    MFX_CODEC_VP9         = MFX_MAKEFOURCC('V','P','9',' ')
 };
 
 enum {

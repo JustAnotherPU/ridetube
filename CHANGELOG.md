@@ -1,5 +1,43 @@
 # Changelog
 
+## App 0.6.0 and service 0.5.0
+
+You can now download videos and watch them with no internet.
+
+App:
+- The player has a Download button, left of On phone. It shows the progress while the video downloads and reads
+  Downloaded once the video is on the car. To remove a download, press Downloaded, then press again within 5 seconds.
+- Library is on the rail (and in the menu). It holds Continue watching and the videos on this car.
+- Home has an On this car shelf. Signed out, Home now shows Continue watching and On this car, with a Sign in tile.
+- A tile that is still downloading says so. If the download stopped, the tile says why (download failed, not enough
+  space).
+- When a video can't play for lack of internet, the player says that downloaded videos still play, in Library.
+- New setting to download the 3, 5 or 10 newest Subscriptions videos on its own. It is off by default.
+- What's new page for 0.6.
+- The new texts are in all 9 languages.
+
+Service:
+- Videos play in VP9 when YouTube has it at the chosen quality, and in H.264 otherwise. Videos that YouTube offers
+  only in VP9 used to fail with "YouTube offers this video in no format RideTube can play". They play now. If the
+  head unit can't decode VP9, the video is fetched again in H.264 from the same place, and the service sticks to
+  H.264 after that, restarts included. Deleting `state/codec.json` in the service's folder turns VP9 back on.
+- New commands `library`, `download`, `remove` and `auto_download` (cap `download`).
+- One download runs at a time. Starting a video stops the download, and it starts over from scratch afterwards.
+- A download starts only with 4 GB free on the head unit. With less, it waits and its tile says not enough space.
+  A download that is running stops if free space drops under 1 GB.
+- Downloads stay until you remove them. The cleanup after a play, the cache limit and the thumbnail limit skip them.
+- A download cut short by a reboot or a failure never counts as on the car. It is fetched again, up to 3 tries.
+- A downloaded video plays from its files, with no network and no yt-dlp. Its thumbnail stays on the car as well.
+- Auto-downloads run only when signed in and on Wi-Fi, never on the phone's data. They skip Shorts, live videos,
+  members-only videos, videos over an hour and videos already watched.
+- When a play fails with no network, the error tells the app (`offline`).
+- Pausing in the first minute of a video now stops the sound. The car's player could keep playing the first
+  minute's audio after a pause, with the clock still moving. The service now sends STOP a second time, and if the
+  player still plays, it releases the audio. Resume starts again where you paused.
+- The player could show no progress bar at the start of a play. This happened after a pause right at the start
+  (the 12 V battery check can cause one), and while a video resumed past its first minute waited for the rest of its
+  audio. After such a pause, resume also started at 0 instead of the saved place. All of this is fixed.
+
 ## Service 0.4.8
 
 - Resuming after the player stopped mid-video could lose your place. While the audio restarted, the service took the

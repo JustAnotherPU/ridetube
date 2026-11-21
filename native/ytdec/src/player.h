@@ -34,6 +34,14 @@ public:
     /* End of stream: every frame still held comes out; the next feed starts
      * a new stream at its first SPS. */
     virtual void flush(const Sink &cb) = 0;
+    /* The index's codec (Index::codec), once, before the first feed; false
+     * with *err: this decoder cannot play it. */
+    virtual bool set_codec(uint32_t codec, std::string *err)
+    {
+        if (codec)
+            *err = "codec not supported";
+        return !codec;
+    }
 };
 
 class Player {
@@ -58,6 +66,12 @@ public:
     uint64_t decoded = 0, shown = 0, dropped = 0;
     int64_t last_shown_pts = -1;
     bool eof_sent = false;
+    /* Non-zero: main exits with it. kCodecFailed: the index's codec is not
+     * H.264 and the decoder refused it, failed before its first frame, or
+     * put out none for kCodecProbe records (ytd.js fetches the video again
+     * as H.264). */
+    static const int kCodecFailed = 4, kCodecProbe = 30;
+    int fatal = 0;
 
 private:
     struct Staged {
@@ -73,6 +87,7 @@ private:
     bool open_inputs(int64_t now);
     bool feed_one(int64_t now);
     void stats(int64_t now);
+    void codec_failed(const std::string &msg);
 
     std::string dir_;
     VideoDecoder *dec_;
@@ -94,6 +109,7 @@ private:
     bool flushed_ = false;
     int64_t last_poll_ = -1000000;
     int64_t end_since_ = -1;         /* every known record fed since then */
+    uint64_t fed_ = 0;               /* records fed in all */
 
     bool has_clock_ = false, paused_ = false;
     int64_t elapsed_ = 0, mono_ = 0, frozen_ = 0;
