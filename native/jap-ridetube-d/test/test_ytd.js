@@ -356,6 +356,54 @@ async function main() {
         await c.waitFor((x) => x.ev === 'state' && x.state === 'idle');
     });
 
+    await t('resume after STOP: the new file\'s ticks before its waiter are not the place (QJZ9TX, 0.4.7)', async () => {
+        await playing();
+        tick(20000);
+        subs.playerState('PLAYER_STATE_STOP');
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+        calls.length = 0; c.clear();
+        slowPlayFile = 300;
+        try {
+            c.send({ cmd: 'resume' });
+            await waitUntil(() => called('playFile').length > 0);
+            tick(150); await sleep(20); tick(400);   // the restarted file plays while playFile still answers
+            assert.ok(Math.abs(d.elapsed - 20000) < 100, 'place kept: ' + d.elapsed);
+            await waitUntil(() => d.tickWaiter);
+            tick(600);   // first tick once waiting: then setTime
+            await waitUntil(() => called('setTime').length > 0);
+            assert.deepStrictEqual(called('setTime')[0].a, { newTimeElapsed: 20000 });
+            assert.ok(!c.evs.some((x) => x.ev === 'time' && x.elapsed < 1000), 'no time at 0 sent');
+        } finally { slowPlayFile = 0; }
+        c.send({ cmd: 'stop' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+    });
+
+    await t('resume, then pause + resume while the file restarts: the newer replay takes over, never back to the start', async () => {
+        await playing();
+        tick(20000);
+        subs.playerState('PLAYER_STATE_STOP');
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'paused');
+        calls.length = 0; c.clear();
+        slowPlayFile = 300;
+        try {
+            c.send({ cmd: 'resume' });
+            await waitUntil(() => called('playFile').length === 1);
+            c.send({ cmd: 'pause' }); c.send({ cmd: 'resume' }); // a double tap while the first playFile answers
+            await waitUntil(() => called('playFile').length === 2);
+            tick(150);
+            await waitUntil(() => d.tickWaiter);
+            tick(300);
+            await waitUntil(() => called('setTime').length > 0);
+            await sleep(3300); // the older replay's waiter times out: it must stop quietly
+            assert.deepStrictEqual(called('setTime').map((x) => x.a.newTimeElapsed), [20000], 'one setTime, at the place');
+            assert.ok(!c.evs.some((x) => x.ev === 'time' && x.elapsed < 1000), 'no time at 0 sent');
+            assert.ok(!c.evs.some((x) => x.ev === 'state' && x.state === 'error'), 'no error');
+            assert.strictEqual(d.replaying, null);
+        } finally { slowPlayFile = 0; }
+        c.send({ cmd: 'stop' });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+    });
+
     await t('end of file (STOP after PLAY, near the end) -> ended, audio released', async () => {
         await playing();
         tick(58000);
@@ -792,6 +840,39 @@ async function main() {
         const tm = await c.waitFor((x) => x.ev === 'time');
         assert.ok(tm.elapsed >= 58700, JSON.stringify(tm));
         assert.strictEqual(d.elapsed, 59900);
+        await stopIdle();
+    });
+
+    await t('head runs out, audio.m4a then, video behind: the new file\'s ticks before its waiter move nothing (QJZ9TX, 0.4.7)', async () => {
+        // car log: "head -> full (waiting)", then "79000 fetched, past the seek: ytdec again at 0" and the place saved at 0
+        await headPlay('FFFFFFFFFHQ', 'hold');
+        await waitUntil(() => d.fetchedMs === 12000);
+        c.clear();
+        tick(58600);
+        await c.waitFor((x) => x.ev === 'state' && x.buffering === true);
+        subs.playerState('PLAYER_STATE_STOP');
+        const from = logs.length, again = () => logs.slice(from).filter((l) => /ytdec again at/.test(l));
+        slowPlayFile = 300;
+        try {
+            fs.writeFileSync(ctl, 'full'); // audio.m4a complete, the video still at 12 s
+            await waitUntil(() => called('playFile').length === 2);
+            tick(150); await sleep(20); tick(400);
+            assert.strictEqual(d.elapsed, 58600, 'place kept');
+            assert.deepStrictEqual(again(), [], 'no ytdec at 0');
+            d.fetchedMs = 79000; d.checkBuffering(); // the video now ahead of the place: no new ytdec while the file restarts
+            assert.deepStrictEqual(again(), [], 'no ytdec while replaying');
+            d.fetchedMs = 12000;
+            await waitUntil(() => d.tickWaiter);
+            tick(600);
+            await waitUntil(() => called('setTime').length === 1);
+            assert.deepStrictEqual(called('setTime').map((x) => x.a.newTimeElapsed), [58600]);
+            assert.ok(!c.evs.some((x) => x.ev === 'time' && x.elapsed < 1000), 'no time at 0 sent');
+            assert.deepStrictEqual(again(), [], 'still no ytdec at 0');
+            await waitUntil(() => d.replaying === null);
+            d.fetchedMs = 79000; d.checkBuffering(); // after the replay the clock extrapolates from the setTime, not the stop
+            const at = again().map((l) => Number(l.split('ytdec again at ')[1]));
+            assert.ok(at.length === 1 && at[0] >= 58600 && at[0] < 58900, 'ytdec at the place: ' + at);
+        } finally { slowPlayFile = 0; }
         await stopIdle();
     });
 

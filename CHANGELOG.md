@@ -1,5 +1,13 @@
 # Changelog
 
+## Service 0.4.8
+
+- Resuming after the player stopped mid-video could lose your place. While the audio restarted, the service took the
+  new file's first times (from 0 s) as the position, so it saved 0 as the resume point and restarted the picture at 0.
+  It now ignores those times until the resume lands.
+- Pausing and resuming again while a resume was still starting could jump back to the start of the video. The newer
+  resume now takes over.
+
 ## App 0.5.1 and service 0.4.7
 
 Fixes found while testing 0.5.0 in the car and in the emulator.

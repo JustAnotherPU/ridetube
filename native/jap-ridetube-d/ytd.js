@@ -23,10 +23,10 @@ const MEDIA_FILES = ['audio.m4a', 'index.bin', 'video.h264'];
 const VIDEO_DIR_MODE = 0o711;
 // thumb.rgba length -> [w, h]: 160x90 in caches from older proxies, 320x180 since 0.1.6
 const THUMB_SIZES = { 57600: [160, 90], 230400: [320, 180] };
-const VERSION = '0.4.7';   // component.json's (test_ytd.js checks): sent with a log report
+const VERSION = '0.4.8';   // component.json's (test_ytd.js checks): sent with a log report
 // the day this build was released (UTC), bumped with VERSION at each release (tools/release.py refuses one in the
 // future). A head unit clock before it is provably wrong: only then does TLS skip the certificate dates (certTime)
-const BUILT = '2026-11-19';
+const BUILT = '2026-11-21';
 // what `hello` says this build answers for real. The frozen names: health, related, hist (feed hist|liked), ytdlp,
 // remote, proxy, stream. A package adds its name here (through the integrator) once its command works
 const CAPS = ['related', 'hist', 'health', 'remote', 'ytdlp'];
@@ -1322,6 +1322,7 @@ function Daemon(o) {
     this.fullReady = false; // audio.m4a complete
     this.headWait = false; // past the head, waiting for audio.m4a: the player is paused, the state buffering
     this.switching = false; // head -> full: the player's events until the seek are the restart's, not ours
+    this.replaying = null; // {gen} of the replayAt under way (onTime drops the restarting file's times)
     this.settle = null;    // {ms, until}: after the switch, ignore the player's stale times below ms
     this.lastTickAt = 0;
     this.thumbQ = [Promise.resolve(), Promise.resolve(), Promise.resolve()];
@@ -1960,7 +1961,7 @@ Daemon.prototype.isBuffering = function () {
 };
 Daemon.prototype.checkBuffering = function () {
     if (this.isBuffering() !== this.buffering) this.sendState();
-    if (this.videoBehind && this.child && this.state === 'playing' && !this.paused && !this.headWait) { // ytdecSeek
+    if (this.videoBehind && this.child && this.state === 'playing' && !this.paused && !this.headWait && !this.replayingNow()) { // ytdecSeek
         const at = Math.round(this.elapsed + (Date.now() - this.lastTickAt));
         if (at + 1000 < this.fetchedMs) {
             this.log('video: ' + this.fetchedMs + ' fetched, past the seek: ytdec again at ' + at);
@@ -2467,29 +2468,39 @@ Daemon.prototype.resume = async function () {
 };
 // The player stopped (our STOP, or it ran dry): start the file again at stoppedAt. Stopped, it ignores playFile and PLAY
 // (car, 2026-11-03): a new connection, as a new video starts. why: the error's prefix if that fails.
+// Until our setTime the new file's times (from 0) are not the place (QJZ9TX). A newer replayAt (a second resume, an
+// underrun) takes over: the older one stops at its next await, without failing the play or taking stoppedAt.
 Daemon.prototype.replayAt = async function (why) {
-    const gen = this.gen;
+    const me = { gen: this.gen };
+    this.replaying = me;
+    try { await this.replayFile(why, me); } finally { if (this.replaying === me) this.replaying = null; }
+};
+Daemon.prototype.replayingNow = function () { return !!this.replaying && this.replaying.gen === this.gen; };
+Daemon.prototype.replayFile = async function (why, me) {
+    const gen = me.gen, gone = () => gen !== this.gen || this.replaying !== me;
     this.sawPlay = false; // the new file's own STOP/PLAY is not a stop mid-file
     this.ytdecSeek(this.stoppedAt);
     this.toYtdec('resume');
     try {
         await this.audio.release();
-        if (gen !== this.gen) return;
+        if (gone()) return;
         await this.startAudio(path.join(this.cur.dir, this.head ? 'audio.head.m4a' : 'audio.m4a'), gen);
     } catch (e) {
-        if (gen === this.gen) await this.failPlayback(why + ': ' + e.message);
+        if (!gone()) await this.failPlayback(why + ': ' + e.message);
         return;
     }
     // (connected after a teardown had released: let it go too)
     if (gen !== this.gen && (this.state === 'error' || this.state === 'idle')) await this.audio.release().catch(() => undefined);
-    if (gen !== this.gen || this.state !== 'playing') return; // stopped, or paused again meanwhile
+    if (gone() || this.state !== 'playing') return; // stopped, paused again or taken over meanwhile
     // a setTime before the new file's first tick is dropped (it started at 0 on the car): wait for one (3 s at most)
-    await new Promise((r) => { this.tickWaiter = r; setTimeout(r, 3000); });
-    this.tickWaiter = null;
-    if (gen !== this.gen || this.state !== 'playing') return;
+    let w;
+    await new Promise((r) => { w = r; this.tickWaiter = r; setTimeout(r, 3000); });
+    if (this.tickWaiter === w) this.tickWaiter = null;
+    if (gone() || this.state !== 'playing') return;
     const at = this.stoppedAt;  // (a seek meanwhile moved it: seek() keeps it while the file restarts)
     this.stoppedAt = null;
     this.settle = { ms: at, until: Date.now() + 3000 };
+    this.lastTickAt = Date.now(); // the clock extrapolates from here, not from before the stop
     await this.audio.seek(at);
 };
 Daemon.prototype.seek = async function (ms) {
@@ -2543,6 +2554,7 @@ Daemon.prototype.onTime = function (v) {
     if (!this.ticking || !v || typeof v.elapsed !== 'number') return;
     if (!(v.total > 1)) return; // {elapsed:0,total:1} right after playFile
     if (this.tickWaiter) { this.tickWaiter(); return; } // resume(): the restarted file plays, its setTime can follow
+    if (this.replayingNow()) return; // replayAt: the file restarts at 0, our setTime is still to come
     if (this.switching || this.headWait) return; // the restart's times, or a paused player
     if (this.settle && Date.now() < this.settle.until && v.elapsed < this.settle.ms - 2000) return; // before our setTime landed
     const step = v.elapsed - this.elapsed;
@@ -2620,8 +2632,8 @@ Daemon.prototype.onPlaybackError = function (v) {
     const msg = 'playback error ' + JSON.stringify(v);
     const fail = (m) => this.failPlayback(m).catch((e) => this.log(e));
     if (!/UNDERRUN/.test(msg)) return fail(msg);
-    if (this.switching || this.headWait || this.recovering || this.paused) {
-        this.log('audio: underrun at ' + this.elapsed + (this.recovering ? ' while recovering' : this.paused ? ' while paused' : ' during the head -> full switch') + ', ignored');
+    if (this.switching || this.headWait || this.recovering || this.paused || this.replayingNow()) {
+        this.log('audio: underrun at ' + this.elapsed + (this.recovering ? ' while recovering' : this.paused ? ' while paused' : this.switching || this.headWait ? ' during the head -> full switch' : ' while the file restarts') + ', ignored');
         return undefined;
     }
     if (this.head && !this.fullReady) {
