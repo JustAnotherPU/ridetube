@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from fractions import Fraction
 
@@ -158,6 +159,371 @@ def fail(msg):
 
 
 MIN_FREE = 256 << 20  # bytes left free on the cache's file system while a video downloads
+
+# ---------------------------------------------------------------- streaming the video through RAM (WP8)
+# fetch --stream AHEAD_MS,BEHIND_MS [--video-dir D]: only the video's window is kept, in D (on the capped tmpfs) or,
+# short of RAM, in <dir>/win on flash. The audio, meta.json and stream-info.json stay in <dir> (flash), as without
+# --stream. The video is fetched in Range requests of VIDEO_CHUNK, each only while less than the window's ahead is
+# fetched past the playback position (ytd.js sends "pos <ms>" lines on stdin), and video.h264 is hole-punched up to
+# the last keyframe behind before it. ytdec preads each access unit at its own offset and every keyframe carries its
+# SPS/PPS, so it never reads a punched part. --start-ms starts at the fragment (the sidx's subsegment or the WebM
+# Cues' cluster, each a keyframe) holding that point: a seek, a resume or a catch-up after a dropped link costs one
+# fragment, never the video from byte 0. The link: tried again for as long as ytd.js is there (backing off to 15 s),
+# and an expired stream URL (403) is looked up again; the same format, the same bytes.
+VIDEO_CHUNK = 2 << 20
+TRIM_MIN = 1 << 20      # punch at least this much at a time
+RAM_FLOOR = 24 << 20    # keep this much of the tmpfs free: the window waits instead
+WINDOW_BYTES = 48 << 20  # the window (ahead + behind) at the format's bitrate, at most
+BEHIND_BYTES = 16 << 20  # ... of which behind playback, at most
+AHEAD_MIN_MS = 15000     # the byte cap never cuts ahead below this (a play starts at 6 s fetched)
+FIRST_MS = 10000         # the first range covers this past the start (ytd.js starts at 6 s), not a blind chunk
+MEM_FLOOR = 600 << 20    # MemAvailable under this: the window goes to flash, or (in RAM) the fetch waits
+MEMINFO = '/proc/meminfo'
+REFRESH_MAX = 3          # new lookups in a row with no byte in between: the URL is gone for good
+HEAD_BYTES = 64 << 10   # ftyp, moov, sidx and the first moof of a YouTube DASH file (more is fetched when they are bigger)
+NET_BACKOFF = (1, 2, 4, 8, 15)   # s between tries while the link is down, then 15 s on
+REFRESH_ON = (403, 404, 410)     # the stream URL expired (~6 h) or moved: a new lookup
+FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE = 1, 2
+
+
+def punch_fn():
+    """fallocate(PUNCH_HOLE) through libc, or None when this Python has no ctypes / libc has no fallocate."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        f = libc.fallocate
+        f.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
+        f.restype = ctypes.c_int
+    except (ImportError, OSError, AttributeError):
+        return None
+
+    def punch(fd, off, n):
+        if f(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, off, n) != 0:
+            e = ctypes.get_errno()
+            raise OSError(e, os.strerror(e))
+    return punch
+
+
+def can_punch(d, punch):
+    """A probe in d: punching frees blocks there (tmpfs since Linux 3.5)."""
+    if punch is None:
+        return False
+    p = os.path.join(d, '.punch')
+    try:
+        fd = os.open(p, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, b'\1' * (256 << 10))
+            os.fsync(fd)
+            before = os.fstat(fd).st_blocks
+            punch(fd, 0, 128 << 10)
+            return os.fstat(fd).st_blocks < before
+        finally:
+            os.close(fd)
+            os.remove(p)
+    except OSError:
+        return False
+
+
+class Window:
+    """The playback position (ytd.js's "pos <ms>" lines) against the video fetched so far, both in ms.
+    gone: stdin closed (ytd.js went away): nothing more is fetched."""
+
+    def __init__(self, ahead_ms, behind_ms, play=0):
+        self.ahead, self.behind = ahead_ms, behind_ms
+        self.play, self.fetched = play, play
+        self.gone = False
+        self.waited = 0.0          # seconds spent waiting for room
+        self.cv = threading.Condition()
+
+    def listen(self, f):
+        def run():
+            try:
+                for line in f:
+                    p = line.split()
+                    if len(p) == 2 and p[0] == 'pos' and p[1].isdigit():
+                        with self.cv:
+                            self.play = int(p[1])
+                            self.cv.notify_all()
+            except (OSError, ValueError):
+                pass
+            with self.cv:
+                self.gone = True
+                self.cv.notify_all()
+        threading.Thread(target=run, daemon=True).start()
+
+    def full(self, free_ok):
+        return self.fetched - self.play > self.ahead or not free_ok()
+
+    def wait_room(self, free_ok, tick=None):
+        """tick: called on each wake while it waits (the Trimmer: what has played goes, written or not)"""
+        t0 = time.monotonic()
+        with self.cv:
+            while not self.gone and self.full(free_ok):
+                if tick:
+                    tick()
+                self.cv.wait(1.0)
+        self.waited += time.monotonic() - t0
+        if self.gone:
+            raise OSError('ytd.js closed the position feed')
+
+
+class HTTPStatus(OSError):
+    """an answer other than 206 to a Range request"""
+
+    def __init__(self, code):
+        super().__init__(f'HTTP {code}')
+        self.code = code
+
+
+class Source:
+    """The video's stream URL: get(start, end) tries again for as long as the window lasts (backing off to 15 s), and
+    a 403/404/410 looks the video up again (refresh) for a new URL of the same format and size. One connection, kept
+    open between requests (keep-alive): a fresh one for each 2 MiB paid a TCP and a TLS handshake and TCP's slow start
+    every time, a large share of each request over a phone's hotspot. A kept connection the server closed meanwhile
+    (idle while the window was full) is opened again at once, not counted as the link down."""
+
+    def __init__(self, f, window, refresh=None, timeout=20):
+        self.url, self.headers, self.size = f['url'], dict(f.get('http_headers') or {}), f['filesize']
+        self.fid, self.window, self.refresh_fn, self.timeout = f.get('format_id'), window, refresh, timeout
+        self.ctx = tls_ctx()
+        self.down = 0              # tries failed in a row (an event says so once, and when the link is back)
+        self.refreshed = 0
+        self.dry = 0               # lookups since the last byte (REFRESH_MAX: given up)
+        self.conn, self.conn_to = None, None   # the kept connection, and the (scheme, host:port) it is to
+        self.connections = 0       # opened so far (tests: one for many requests)
+
+    def close(self):
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+        self.conn, self.conn_to = None, None
+
+    def _once(self, s, e):
+        """bytes s..e-1 in one request on the kept connection (a new one when there is none, or it is to another host,
+        or the kept one turned out closed before an answer), following redirects; HTTPStatus for any other answer"""
+        for _ in range(5):   # redirects
+            u = urllib.parse.urlsplit(self.url)
+            target = (u.path or '/') + ('?' + u.query if u.query else '')
+            for fresh in (False, True):
+                reused = self.conn is not None and self.conn_to == (u.scheme, u.netloc) and not fresh
+                if not reused:
+                    self.close()
+                    if u.scheme == 'https':
+                        self.conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=self.timeout, context=self.ctx)
+                    else:
+                        self.conn = http.client.HTTPConnection(u.hostname, u.port, timeout=self.timeout)
+                    self.conn_to = (u.scheme, u.netloc)
+                    self.connections += 1
+                try:
+                    self.conn.request('GET', target, headers=dict(self.headers, Range=f'bytes={s}-{e - 1}'))
+                    r = self.conn.getresponse()
+                    break
+                except (OSError, http.client.HTTPException):
+                    self.close()
+                    if not reused:
+                        raise
+            if r.status in (301, 302, 303, 307, 308) and r.getheader('Location'):
+                r.read()
+                if r.will_close:
+                    self.close()
+                self.url = urllib.parse.urljoin(self.url, r.getheader('Location'))
+                continue
+            if r.status != 206:
+                r.read()
+                self.close()
+                raise HTTPStatus(r.status)
+            out = bytearray()
+            try:
+                while len(out) < e - s:
+                    b = r.read(min(1 << 16, e - s - len(out)))
+                    if not b:
+                        raise OSError(f'short read at {s + len(out)} of {s}-{e}')
+                    out += b
+            except BaseException:
+                self.close()
+                raise
+            if r.will_close or r.read(1):   # (a longer body than asked: the connection cannot be reused)
+                self.close()
+            return bytes(out)
+        self.close()
+        raise OSError('too many redirects')
+
+    def refresh(self):
+        f = self.refresh_fn(self.fid)
+        if f.get('filesize') and f['filesize'] != self.size:
+            raise OSError('the format changed size: %s, not %s' % (f['filesize'], self.size))
+        self.url, self.headers = f['url'], dict(f.get('http_headers') or self.headers)
+        self.refreshed += 1
+
+    def get(self, s, e):
+        """bytes s..e-1"""
+        while True:
+            try:
+                out = self._once(s, e)
+                if self.down:
+                    emit(ev='net', ok=True, tries=self.down)
+                    self.down = 0
+                self.dry = 0
+                return out
+            except HTTPStatus as x:
+                why = f'HTTP {x.code}'
+                if self.window.gone:
+                    raise OSError('ytd.js closed the position feed')
+                if x.code in REFRESH_ON and self.refresh_fn:
+                    if self.dry >= REFRESH_MAX:
+                        raise OSError(f'{why} after {self.dry} new lookups')
+                    self.dry += 1
+                    try:
+                        self.refresh()
+                        if self.dry == 1:
+                            continue           # at once, with the new URL; a second one after the backoff
+                    except Exception as r:  # noqa: BLE001 - the lookup needs the link too: tried again below
+                        why += f'; lookup again: {r}'
+            except (OSError, http.client.HTTPException) as x:
+                why = str(x) or type(x).__name__
+            if self.window.gone:
+                raise OSError('ytd.js closed the position feed')
+            self.down += 1
+            if self.down == 1:
+                emit(ev='net', ok=False, msg=why[-200:])
+            wait = NET_BACKOFF[min(self.down - 1, len(NET_BACKOFF) - 1)]
+            with self.window.cv:
+                if not self.window.gone:   # (set between the check above and here: its notify would be missed)
+                    self.window.cv.wait(wait)
+
+
+class PacedReader:
+    """A file for the demuxers: the source's bytes from start on, in Range requests of chunk (the first one of first
+    bytes), each only once the window has room. before_wait: called before each request and each wait (the progress
+    events are throttled, so the last one may be behind what is fetched; said before blocking, ytd.js's fetched point
+    is the real one: 3.5 s said while 27.5 s was in held a play's start for seconds). on_wait: called while it waits."""
+
+    def __init__(self, src, start, window, free_ok, chunk=VIDEO_CHUNK, before_wait=None, first=None, on_wait=None):
+        self.src, self.total, self.window, self.free_ok, self.chunk = src, src.size, window, free_ok, chunk
+        self.before_wait, self.first, self.on_wait = before_wait, first, on_wait
+        self.buf, self.at, self.off, self.bytes = b'', 0, start, 0
+
+    def read(self, n):
+        while len(self.buf) - self.at < n and self.off < self.total:
+            if self.before_wait:
+                self.before_wait()
+            self.window.wait_room(self.free_ok, self.on_wait)
+            e = min(self.off + (self.first or self.chunk), self.total)
+            self.first = None
+            data = self.src.get(self.off, e)
+            self.bytes += len(data)
+            self.buf, self.at, self.off = self.buf[self.at:] + data, 0, e
+        b = self.buf[self.at:self.at + n]
+        self.at += len(b)
+        return b
+
+
+class Prefixed:
+    """prefix's bytes, then f's: the moov ahead of the fragments a stream starts at"""
+
+    def __init__(self, prefix, f):
+        self.prefix, self.f = prefix, f
+
+    def read(self, n):
+        if self.prefix:
+            b, self.prefix = self.prefix[:n], self.prefix[n:]
+            if len(b) < n:
+                b += self.f.read(n - len(b))
+            return b
+        return self.f.read(n)
+
+
+def parse_sidx(b):
+    """sidx box bytes -> (timescale, earliest presentation time, first offset, [(size, duration, starts with SAP)])"""
+    v = b[8]
+    ts = struct.unpack_from('>I', b, 16)[0]
+    if v == 0:
+        ept, first = struct.unpack_from('>II', b, 20)
+        p = 28
+    else:
+        ept, first = struct.unpack_from('>QQ', b, 20)
+        p = 36
+    n = struct.unpack_from('>H', b, p + 2)[0]
+    p += 4
+    subs = []
+    for _ in range(n):
+        r, d, sap = struct.unpack_from('>III', b, p)
+        p += 12
+        if r >> 31:
+            raise ValueError('sidx: a hierarchical index')
+        subs.append((r & 0x7fffffff, d, sap >> 31))
+    return ts, ept, first, subs
+
+
+def stream_layout(get):
+    """The DASH file's start (get(s, e): bytes s..e-1): moov, the time base (the first fragment's earliest pts, as
+    demux_video takes it from 0) and every fragment [(byte offset, start ms)]. None without a usable sidx."""
+    head = get(0, HEAD_BYTES)
+    boxes_at, i = {}, 0
+    while True:
+        if i + 8 > len(head):
+            head += get(len(head), i + 8 + HEAD_BYTES)
+        size, t = struct.unpack_from('>I4s', head, i)
+        if size < 8:
+            return None
+        if i + size > len(head):
+            head += get(len(head), i + size + (2 << 10))   # (and the next box's header)
+        boxes_at[t] = (i, size)
+        if t == b'moof':
+            break
+        i += size
+    if b'moov' not in boxes_at or b'sidx' not in boxes_at:
+        return None
+    ms_, mz = boxes_at[b'moov']
+    moov = head[ms_:ms_ + mz]
+    tk = trak_info(moov)
+    xs, xz = boxes_at[b'sidx']
+    ts, ept, first, subs = parse_sidx(head[xs:xs + xz])
+    if ts != tk['ts'] or not subs or not all(s[2] for s in subs):
+        return None
+    fs, fz = boxes_at[b'moof']
+    samples, _ = parse_moof(head[fs:fs + fz], 0, tk['trex'])
+    if not samples:
+        return None
+    base = min(s[2] + s[3] for s in samples)
+    off, t, frags = xs + xz + first, ept, []
+    for size, dur, _ in subs:
+        frags.append((off, max(0, round((t - base) * 1000 / ts))))
+        off, t = off + size, t + dur
+    return {'init': moov, 'base': base, 'frags': frags, 'end': off, 'webm': False}
+
+
+class Trimmer:
+    """Punches video.h264 up to the last keyframe window.behind before the playback position."""
+
+    def __init__(self, window, punch):
+        self.window, self.punch = window, punch
+        self.keys = []             # (ms, pos) of keyframes past the punched part
+        self.done, self.ms = 0, 0  # punched up to this byte / this keyframe's ms
+        self.fd = None             # video.h264.part, once written
+
+    def key(self, ms, pos):
+        self.keys.append((ms, pos))
+
+    def poll(self):
+        """the same while the fetch waits for room (no write to trigger it); nothing before the first write"""
+        if self.fd is not None:
+            self.after_write(self.fd)
+
+    def after_write(self, fd):
+        self.fd = fd
+        cut = self.window.play - self.window.behind
+        i = 0
+        while i + 1 < len(self.keys) and self.keys[i + 1][0] <= cut:
+            i += 1
+        if not self.keys or self.keys[i][0] > cut or self.keys[i][1] - self.done < TRIM_MIN:
+            return
+        ms, pos = self.keys[i]
+        self.punch(fd, self.done, pos - self.done)
+        self.done, self.ms, self.keys = pos, ms, self.keys[i:]
+        emit(ev='trim', ms=ms, bytes=pos)
 
 
 class Throttle:
@@ -674,11 +1040,13 @@ def read_box(f):
     return t, h + body
 
 
-def demux_video(f, d, duration_s, on_progress):
-    """Stream fMP4 from f into d/video.h264.part + d/index.bin. Returns (frames, bytes, max_ms)."""
+def demux_video(f, d, duration_s, on_progress, trim=None, base=None):
+    """Stream fMP4 from f into d/video.h264.part + d/index.bin. Returns (frames, bytes, max_ms).
+    trim (a Trimmer): told every keyframe, and called after each write to punch what has played.
+    base: the time base, when f starts mid-file (stream_layout's): the index then says the same ms as from 0."""
     vfd = os.open(os.path.join(d, 'video.h264.part'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     ifd = os.open(os.path.join(d, 'index.bin'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    at, conv, tk, base, pos, count, max_ms, dts, moof = 0, None, None, None, 0, 0, 0, 0, None
+    at, conv, tk, pos, count, max_ms, dts, moof, hdr = 0, None, None, 0, 0, 0, 0, None, False
     try:
         while (bx := read_box(f)) is not None:
             t, b = bx
@@ -709,6 +1077,8 @@ def demux_video(f, d, duration_s, on_progress):
                 payload = memoryview(b)[data_at - at:]
                 if base is None:
                     base = min(s[2] + s[3] for s in samples)
+                if not hdr:
+                    hdr = True
                     dur = (samples[1][2] - samples[0][2]) if len(samples) > 1 else (tk['trex'][0] or 1)
                     fps = Fraction(tk['ts'], dur).limit_denominator(1001)
                     os.write(ifd, HDR.pack(b'MGYI', 1, w, h, fps.numerator, fps.denominator, 0, bytes(4)))
@@ -725,6 +1095,8 @@ def demux_video(f, d, duration_s, on_progress):
                     max_ms = max(max_ms, ms)
                     vbuf.append(au)
                     ibuf.append(REC.pack(ms, pos, len(au), key))
+                    if trim is not None and key:
+                        trim.key(ms, pos)
                     pos += len(au)
                     count += 1
                 # order matters to the reader: bytes, then their records, then the count
@@ -733,6 +1105,8 @@ def demux_video(f, d, duration_s, on_progress):
                 os.pwrite(ifd, struct.pack('<I', count), 16)
                 moof = None
                 on_progress(max_ms, count, pos)
+                if trim is not None:
+                    trim.after_write(vfd)
             at += len(b)
     finally:
         os.close(vfd)
@@ -809,13 +1183,14 @@ def _webm_track(tracks):
     raise ValueError('vp9: no video track')
 
 
-def demux_webm(f, d, duration_s, on_progress):
+def demux_webm(f, d, duration_s, on_progress, trim=None, base=None):
     """Stream WebM from f into d/video.h264.part (raw VP9 frames, superframes whole) + d/index.bin (codec VP9).
     Segment and Cluster may have an unknown size: their children are read in turn; anything else is read by its
-    size (Cues may come before the first Cluster). Returns (frames, bytes, max_ms)."""
+    size (Cues may come before the first Cluster). Returns (frames, bytes, max_ms).
+    trim, base (ns): as demux_video's, when f starts at a cluster (webm_layout's); frames before its first keyframe go."""
     vfd = os.open(os.path.join(d, 'video.h264.part'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     ifd = os.open(os.path.join(d, 'index.bin'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    scale, track, cluster, base, pos, count, max_ms, pending = 1000000, None, None, None, 0, 0, 0, []
+    scale, track, cluster, pos, count, max_ms, pending, mid = 1000000, None, None, 0, 0, 0, [], base is not None
 
     def header(fps):
         os.write(ifd, HDR.pack(b'MGYI', 1, track[1], track[2], fps.numerator, fps.denominator, 0, VP9))
@@ -827,6 +1202,8 @@ def demux_webm(f, d, duration_s, on_progress):
         t = (cluster + rel) * scale  # ns
         base = t if base is None else base
         if not pending and not count and not key:
+            if mid:
+                return
             raise ValueError('vp9: first frame is not a keyframe')
         pending.append((max(0, round((t - base) / 1e6)), key, bytes(data)))
         if not count and not track[3] and len(pending) < 16:
@@ -844,6 +1221,8 @@ def demux_webm(f, d, duration_s, on_progress):
         recs = []
         for ms, key, data in pending:
             recs.append(REC.pack(ms, pos, len(data), key))
+            if trim is not None and key:
+                trim.key(ms, pos)
             pos += len(data)
             max_ms = max(max_ms, ms)
         # order matters to the reader: bytes, then their records, then the count
@@ -853,6 +1232,8 @@ def demux_webm(f, d, duration_s, on_progress):
         os.pwrite(ifd, struct.pack('<I', count), 16)
         pending.clear()
         on_progress(max_ms, count, pos)
+        if trim is not None:
+            trim.after_write(vfd)
 
     try:
         while (el := _element(f)) is not None:
@@ -901,6 +1282,88 @@ def demux_webm(f, d, duration_s, on_progress):
         raise ValueError('vp9: no frames')
     os.replace(os.path.join(d, 'video.h264.part'), os.path.join(d, 'video.h264'))
     return count, pos, max_ms
+
+
+SEEKHEAD, CUES = 0x114D9B74, 0x1C53BB6B
+
+
+def webm_layout(get, size):
+    """The WebM file's start (get(s, e): bytes s..e-1): its bytes up to Tracks (what demux_webm reads before a
+    cluster), the time base (the first cue's, as demux_webm takes it from 0; ns) and every cued cluster
+    [(byte offset, start ms)], from the Cues before the first Cluster (YouTube's) or where the SeekHead says.
+    None without usable Cues."""
+    head = get(0, min(HEAD_BYTES, size))
+
+    def at(i, n):   # bytes i..i+n-1: from the head, grown when they follow it, else asked on their own
+        nonlocal head
+        if len(head) < i + n <= size and i <= len(head) + HEAD_BYTES:
+            head += get(len(head), min(size, i + n + (2 << 10)))
+        return head[i:i + n] if i + n <= len(head) else get(i, i + n)
+
+    def el(i):      # (id, size, header length) at i
+        b = io.BytesIO(at(i, min(12, size - i)))
+        eid, n = _element(b) or (None, -1)
+        return eid, n, b.tell()
+
+    eid, n, h = el(0)
+    if eid != 0x1A45DFA3 or n < 0:
+        return None
+    i = h + n
+    eid, n, h = el(i)
+    if eid != SEGMENT:
+        return None
+    seg = i + h
+    end = seg + n if n >= 0 else size
+    if end > size:
+        return None
+    i, scale, track, init, cues, cues_at = seg, 1000000, None, 0, None, None
+    while i < end:
+        eid, n, h = el(i)
+        if eid == CLUSTER or n < 0:
+            break
+        if eid in (INFO, TRACKS, CUES, SEEKHEAD):
+            body = at(i + h, n)
+            if eid == INFO:
+                scale = next((int.from_bytes(v, 'big') for k, v in _children(body) if k == 0x2AD7B1), scale)
+                init = max(init, i + h + n)
+            elif eid == TRACKS:
+                track, init = _webm_track(body), max(init, i + h + n)
+            elif eid == CUES:
+                cues = body
+            else:
+                for k, v in _children(body):
+                    sk = dict(_children(v)) if k == 0x4DBB else {}
+                    if sk.get(0x53AB) == CUES.to_bytes(4, 'big') and 0x53AC in sk:
+                        cues_at = seg + int.from_bytes(sk[0x53AC], 'big')
+        i += h + n
+    if track is None:
+        return None
+    if cues is None and cues_at is not None and cues_at < end:
+        eid, n, h = el(cues_at)
+        if eid == CUES and n > 0:
+            cues = at(cues_at + h, n)
+    if cues is None:
+        return None
+    points = {}
+    for k, cp in _children(cues):
+        t = off = None
+        for k2, v in _children(cp) if k == 0xBB else ():
+            if k2 == 0xB3:
+                t = int.from_bytes(v, 'big')
+            elif k2 == 0xB7:
+                tp = dict(_children(v))
+                if int.from_bytes(tp.get(0xF7, b''), 'big') == track[0] and 0xF1 in tp:
+                    off = seg + int.from_bytes(tp[0xF1], 'big')
+        if t is not None and off is not None and (off not in points or t < points[off]):
+            points[off] = t   # a cluster holding several cued keyframes: its first
+    if not points:
+        return None
+    pts = sorted(points.items())
+    if any(b[1] <= a[1] for a, b in zip(pts, pts[1:])):
+        return None
+    base = pts[0][1] * scale
+    return {'init': at(0, init), 'base': base, 'frags': [(o, round((t * scale - base) / 1e6)) for o, t in pts],
+            'end': end, 'webm': True}
 
 
 # ---------------------------------------------------------------- fetch
@@ -1135,6 +1598,166 @@ def audio_ranged(a, ya, info, meta, udta=lambda: b''):
     return src
 
 
+def ram_free(d):
+    try:
+        s = os.statvfs(d)
+        return s.f_bavail * s.f_frsize
+    except OSError:
+        return 0
+
+
+def mem_available():
+    """MemAvailable in bytes, None when /proc/meminfo has none (not Linux)"""
+    try:
+        with open(MEMINFO) as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) << 10
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def mem_ok():
+    m = mem_available()
+    return m is None or m >= MEM_FLOOR
+
+
+def window_ms(ahead, behind, bps):
+    """(ahead, behind) ms: the asked ones, cut to WINDOW_BYTES (BEHIND_BYTES of it behind) at bps bytes/s"""
+    behind = min(behind, BEHIND_BYTES * 1000 // bps)
+    ahead = min(ahead, max(AHEAD_MIN_MS, (WINDOW_BYTES - behind * bps // 1000) * 1000 // bps))
+    return int(ahead), int(behind)
+
+
+def plan_stream(a, yt_dlp, url, yv, info):
+    """--stream: the plan to fetch only the video's window (a dict), in --video-dir (RAM) when it fits there with
+    MemAvailable over MEM_FLOOR, else in <dir>/win on flash; or None (a spill event says why): then the whole video is
+    fetched into <dir> as without --stream (no ranges, no sidx or Cues, no hole punching). Decided before anything
+    is written; the format's index is read here."""
+    ahead, behind = a.stream
+    why, fv = None, None
+    try:
+        fv = yv.process_ie_result(copy.deepcopy(info), download=False)
+        fv = (fv.get('requested_downloads') or [fv])[0]
+    except Exception as e:  # noqa: BLE001 - the old path reports what yt-dlp says
+        why = f'formats: {e}'
+    dur = info.get('duration') or 0
+    if not why and (fv.get('protocol') not in ('https', 'http') or not fv.get('url') or not fv.get('filesize')):
+        why = 'video not fetchable in ranges'
+    elif not why and not dur:
+        why = 'no duration'
+    w = lay = src = None
+    if not why:
+        def refresh(fid):
+            nfo = extract(yt_dlp, a, url)
+            for f in nfo.get('formats') or []:
+                if f.get('format_id') == fid and f.get('url'):
+                    return f
+            raise OSError(f'format {fid} gone')
+
+        w = Window(ahead, behind, a.start_ms)
+        w.listen(sys.stdin)   # (now: ytd.js going away ends the retries of the index's requests too)
+        src = Source(fv, w, refresh)
+        webm = fv.get('ext') == 'webm'
+        try:
+            lay = webm_layout(src.get, src.size) if webm else stream_layout(src.get)
+        except (ValueError, struct.error, TypeError, KeyError, IndexError) as e:
+            lay = None
+            print(f'index: {e}', file=sys.stderr, flush=True)
+        except OSError as e:   # the link, or the URL gone for good
+            fail(f'video: {e}')
+        if lay is None or lay['end'] != src.size:
+            why = 'no cues to stream it from' if webm else 'no fragment index (sidx) to stream it from'
+    if why:
+        emit(ev='spill', why=why, dir=a.dir)
+        return None
+    bps = max(1, int(fv['filesize'] / dur))
+    w.ahead, w.behind = window_ms(ahead, behind, bps)
+    need = int(bps * (w.ahead + w.behind) // 1000 + 3 * VIDEO_CHUNK + RAM_FLOOR)
+    punch, vdir, ram_why = punch_fn(), None, None
+    if not a.video_dir:
+        ram_why = 'no RAM folder'
+    elif not mem_ok():
+        ram_why = f'{mem_available() >> 20} MiB of memory available'
+    else:
+        room = min(a.budget, ram_free(a.video_dir)) if a.budget else ram_free(a.video_dir)
+        if need > room:
+            ram_why = f'needs {need >> 20} MiB of RAM, {room >> 20} MiB there'
+        elif not can_punch(a.video_dir, punch):
+            ram_why = 'no hole punching on ' + a.video_dir
+        else:
+            vdir = a.video_dir
+    if vdir is None:
+        vdir = os.path.join(a.dir, 'win')
+        os.makedirs(vdir, exist_ok=True)
+        if not can_punch(vdir, punch):
+            emit(ev='spill', why='no hole punching on ' + vdir, dir=a.dir)
+            return None
+    return {'w': w, 'src': src, 'lay': lay, 'punch': punch, 'need': need, 'dir': vdir, 'ram': vdir == a.video_dir,
+            'ram_why': ram_why}
+
+
+def fetch_stream(a, meta, plan, audio, done_a):
+    """The video from the fragment at --start-ms, through a PacedReader into the plan's folder, punched behind
+    playback; the audio as before, into <dir> (none with --video-only)."""
+    w, src, lay, vdir = plan['w'], plan['src'], plan['lay'], plan['dir']
+    frags = lay['frags']
+    k = 0
+    for i, (_, ms) in enumerate(frags):
+        if ms <= a.start_ms:
+            k = i
+    off, from_ms = frags[k]
+    w.fetched = w.play = from_ms if a.start_ms else 0
+    # the first range: up to the first fragment FIRST_MS past the start (one request, then ytd.js can start)
+    j = next((i for i in range(k + 1, len(frags)) if frags[i][1] >= from_ms + FIRST_MS), None)
+    first = min(max((frags[j][0] if j is not None else lay['end']) - off, HEAD_BYTES), 4 * VIDEO_CHUNK)
+    emit(ev='stream', ahead_ms=w.ahead, behind_ms=w.behind, need=plan['need'], video_bytes=src.size, from_ms=from_ms,
+         fragment=k, fragments=len(frags), dir=vdir, stored='ram' if plan['ram'] else 'flash',
+         codec='vp9' if lay['webm'] else 'h264', **({'why': plan['ram_why']} if plan['ram_why'] else {}))
+    tick_v, dur_ms, last = Throttle(), (meta['duration_s'] or 0) * 1000, {'said': None, 'now': None}
+
+    def say_video():
+        if last['now'] and last['now'] != last['said']:
+            ms, frames, nbytes = last['now']
+            last['said'] = last['now']
+            emit(ev='video', ms=ms, frames=frames, bytes=nbytes, dl=reader.bytes, waited=round(w.waited),
+                 pct=min(100, round(ms * 100 / dur_ms)) if dur_ms else 0)
+
+    if plan['ram']:
+        def free_ok():
+            return ram_free(vdir) >= RAM_FLOOR and mem_ok()
+    else:
+        def free_ok():   # (flash: the window waits rather than fill /var/opt, shared with the Store)
+            return ram_free(vdir) >= MIN_FREE
+    trim = Trimmer(w, plan['punch'])
+    reader = PacedReader(src, off, w, free_ok, before_wait=say_video, first=first, on_wait=trim.poll)
+    ta = None
+    if not a.video_only:
+        ta = threading.Thread(target=audio, daemon=True)
+        ta.start()
+
+    def vprog(ms, frames, nbytes):
+        w.fetched = ms
+        last['now'] = (ms, frames, nbytes)
+        if tick_v():
+            say_video()
+
+    demux = demux_webm if lay['webm'] else demux_video
+    try:
+        frames, nbytes, ms = demux(Prefixed(lay['init'], reader), vdir, meta['duration_s'], vprog, trim=trim,
+                                   base=lay['base'])
+    except Exception as e:  # noqa: BLE001 - a VP9 stream we cannot read: the daemon fetches again with --avc1
+        fail(f'vp9: {e}' if lay['webm'] and not isinstance(e, OSError) else f'video: {e}')
+    emit(ev='video', ms=ms, frames=frames, bytes=nbytes, dl=reader.bytes, waited=round(w.waited), pct=100)
+    if ta is not None:
+        ta.join()
+        if not done_a:
+            fail('audio: unfinished')
+    emit(ev='done')
+    return 0
+
+
 def fetch(a):
     if not ID_RE.match(a.id):
         fail('bad id')
@@ -1154,10 +1777,20 @@ def fetch(a):
                                outtmpl={'default': os.path.join(a.dir, 'audio.src.%(ext)s')}))
     yv = yt_dlp.YoutubeDL(dict(ydl_params(a, video_fmt(a.height, not a.avc1)), outtmpl={'default': '-'}))
     info = load_info(a.info, a.id, a.avc1)
+    looked_up = info is None
     try:
         info = info or extract(yt_dlp, a, url)
     except Exception as e:  # noqa: BLE001 - any yt-dlp failure is reported to the daemon
         fail(clock_wrong(e) or bot_check(e) or f'extract: {e}')
+    plan = plan_stream(a, yt_dlp, url, yv, info) if a.stream else None
+    if a.video_only and not plan:
+        fail('video: cannot stream it again from there')   # (a restart: ytd.js plays on without the picture)
+    if plan and looked_up:
+        # this lookup, for a fetch that starts again at another point (a seek, a dropped link): --info, no 2.5 s lookup
+        tmp = os.path.join(a.dir, 'stream-info.json.tmp')
+        with open(tmp, 'w') as f:
+            json.dump(yt_dlp.YoutubeDL.sanitize_info(info), f)
+        os.replace(tmp, os.path.join(a.dir, 'stream-info.json'))
     meta = {'id': a.id, 'title': info.get('title'), 'channel': info.get('channel') or info.get('uploader'),
             'duration_s': info.get('duration'),
             'chapters': [[int((c.get('start_time') or 0) * 1000), str(c.get('title') or '')[:80]]
@@ -1177,7 +1810,8 @@ def fetch(a):
         art['cover'] = fetch_cover(a.id, tls_ctx())
 
     tc = threading.Thread(target=cover, daemon=True)
-    tc.start()
+    if not a.video_only:
+        tc.start()
 
     def udta():
         return tags_udta(meta['title'], meta['channel'], art['cover'])
@@ -1201,6 +1835,9 @@ def fetch(a):
             emit(ev='audio_ready', bytes=n)
         except BaseException as e:  # noqa: BLE001
             fail(f'audio: {ya.params["logger"].last or e}')
+
+    if plan:
+        return fetch_stream(a, meta, plan, audio, done_a)
 
     rfd, wfd = os.pipe()
     sys.stdout = io.TextIOWrapper(os.fdopen(wfd, 'wb'))  # yt-dlp writes outtmpl '-' to sys.stdout.buffer
@@ -1659,7 +2296,15 @@ def main(argv=None):
     ap.add_argument('--json', action='store_true', help='check: the health probes only, as JSON lines')
     ap.add_argument('--no-cert-time', action='store_true', help="TLS: skip only the certificate's validity dates")
     ap.add_argument('--releases')
+    # WP8: only the video's window kept, in --video-dir (RAM) or <dir>/win (flash); else the whole video as before
+    ap.add_argument('--stream', type=lambda s: tuple(int(x) for x in s.split(',')), metavar='AHEAD_MS,BEHIND_MS')
+    ap.add_argument('--video-dir', help='--stream: the RAM folder for the window (on the capped tmpfs)')
+    ap.add_argument('--budget', type=int, default=0, help='bytes of RAM the stream may plan for (0: the tmpfs free)')
+    ap.add_argument('--start-ms', type=int, default=0, help='--stream: from the fragment holding this point')
+    ap.add_argument('--video-only', action='store_true', help='--stream: the audio is there already (a restart)')
     a = ap.parse_args(argv)
+    if (a.start_ms or a.video_only or a.video_dir) and not a.stream:
+        fail('--start-ms, --video-only and --video-dir go with --stream')
     global cert_time
     cert_time = not a.no_cert_time
     if a.cmd == 'request':

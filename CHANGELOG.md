@@ -1,5 +1,24 @@
 # Changelog
 
+## Service 0.5.1
+
+Videos now stream while they play instead of being downloaded whole. This builds on @7amoody1985's work in #20.
+
+- The service fetches only the part of the video around where you are watching, up to 2 minutes ahead and at most
+  48 MB, and drops what is behind. Before, every play fetched the whole video, so a long video cost its full size in
+  mobile data even if you watched five minutes of it.
+- A far seek, ahead or back, starts from that point. On a 10 Mbit link, a seek to minute 50 of a 67 minute video had
+  not started after 20 minutes; it now plays in about 2 s once the audio is in.
+- The video part sits in RAM, in a 256 MB tmpfs of which about 6 to 20 MB is used while playing. With less than
+  600 MB of memory free on the head unit it goes to flash instead and works the same way. The audio file stays on
+  flash.
+- Flash writes per play drop from the whole video (up to about 500 MB) to about twice the audio file.
+- VP9 and H.264 both stream. A video with no index to stream from is fetched whole, as before.
+- Downloads are still fetched whole. Pressing Download on a video that is playing now downloads it once the play
+  stops.
+- A far seek made before the audio has finished downloading still waits for the audio, and no longer fetches video
+  meanwhile that would only be thrown away.
+
 ## App 0.6.0 and service 0.5.0
 
 You can now download videos and watch them with no internet.
