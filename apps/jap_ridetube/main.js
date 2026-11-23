@@ -73,7 +73,7 @@ const { setImage } = require('./kit/record');
 const { HMI } = require('./kit/display');
 const Parked = require('./kit/parked');
 const { Touchpad, TouchMode, MODE: PAD_MODE } = require('./kit/touchpad');
-const { Ctl, Model, clock, SOCKET, FEEDS, SHELF_MAX, followStoreProxy } = require('./yt');
+const { Ctl, Model, clock, SOCKET, FEEDS, SHELF_MAX, followStoreProxy, driveLock } = require('./yt');
 const { spell } = require('./speller');
 
 const W = 1600, H = 520;
@@ -135,16 +135,10 @@ mgu.run({
             (settings.get('language') || 'auto') === 'auto'));
         let helloSent = JSON.stringify(hello());
         const parked = Parked.watch(ctx, log, { strict: true });
-        // the drive lock: Video while driving counts only once switched on while parked, so a press while moving
-        // cannot bring the picture up; switching it off works at once
-        let videoDrivingOk = false;
+        const lock = driveLock(settings);   // Video while driving counts only once switched on while parked (yt.js)
         // the disclaimer (risk page): switched on, the setting counts only once I agree is pressed; already on at start = agreed before
         let riskAgreed = settings.get('video_driving') === true, riskAsk = false, riskFrom = 'home';
-        const noVideo = () => {
-            const on = settings.get('video_driving') === true && riskAgreed, moving = parked.moving();
-            videoDrivingOk = moving ? videoDrivingOk && on : on;
-            return moving && !videoDrivingOk;
-        };
+        const noVideo = () => lock(settings.get('video_driving') === true && riskAgreed, parked.moving());
 
         /* ---------- the daemon ---------- */
         const ctl = new Ctl(process.env.MGU_YT_SOCKET || SOCKET, log);

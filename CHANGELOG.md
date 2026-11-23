@@ -1,5 +1,13 @@
 # Changelog
 
+## App 0.6.3
+
+- Video while driving now stays available when the app restarts while the car is moving, for example after an update
+  or a head unit restart. Before, the passenger lost the picture until the car had been parked once, which looked as
+  if the setting had switched itself off. Switching the setting on while moving still doesn't count until you park,
+  and switching it off still works at once. If the setting was already on before this update, the picture is there
+  right after it, even while driving.
+
 ## App 0.6.1 and service 0.5.3
 
 RideTube can now use the proxy set in the MGU Store, for networks that block YouTube (#21).

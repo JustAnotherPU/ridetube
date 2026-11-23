@@ -610,4 +610,18 @@ function followStoreProxy(settings, model) {
     };
 }
 
-module.exports = { Ctl, Model, clock, SOCKET, FEEDS, FEED_MAX, SHELF_MAX, followStoreProxy };
+// The drive lock of "Video while driving": the setting counts only once it is on while parked, so a press while moving
+// cannot bring the picture up; off works at once. That parked yes is kept with the settings (video_driving_ok), so a
+// restart while driving (an update, the head unit) keeps the passenger's picture. Settings from before 0.6.3 have no
+// video_driving_ok: on there counts as said yes (as riskAgreed does), and every check saves the answer, false too.
+// Returns (on, moving) => no video.
+function driveLock(settings) {
+    let ok = settings.get('video_driving') === true && settings.get('video_driving_ok') !== false;
+    return (on, moving) => {
+        ok = moving ? ok && on : on;
+        if (settings.get('video_driving_ok') !== ok) settings.set('video_driving_ok', ok);
+        return moving && !ok;
+    };
+}
+
+module.exports = { Ctl, Model, clock, SOCKET, FEEDS, FEED_MAX, SHELF_MAX, followStoreProxy, driveLock };

@@ -12,7 +12,7 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const { Ctl, Model, clock, followStoreProxy } = require('../../apps/jap_ridetube/yt');
+const { Ctl, Model, clock, followStoreProxy, driveLock } = require('../../apps/jap_ridetube/yt');
 
 const quiet = { info() {}, warn() {}, error(m, e) { throw e || new Error(m); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -113,6 +113,32 @@ async function clientAndModel() {
         assert.strictEqual(vals.store_proxy, false, 'chosen off: the Store no longer moves it');
         const m2 = {}; followStoreProxy(st, m2);
         assert.strictEqual(m2.storeProxy, false, 'chosen off kept at the next start: sent as off');
+    }
+
+    // the drive lock survives a restart while driving (an update): the parked yes is kept with the settings
+    {
+        const old = { video_driving: true }, so = { get: (k) => old[k], set: (k, v) => { old[k] = v; } };
+        assert.strictEqual(driveLock(so)(true, true), false, 'an update from before 0.6.3 with it on: the picture stays');
+        assert.strictEqual(old.video_driving_ok, true, 'and that is saved');
+        const vals = { video_driving: false }, st = { get: (k) => vals[k], set: (k, v) => { vals[k] = v; } };
+        let lock = driveLock(st);
+        assert.strictEqual(lock(false, true), true, 'off');
+        vals.video_driving = true;   // switched on while moving
+        assert.strictEqual(lock(true, true), true, 'switched on while moving: no video');
+        assert.strictEqual(vals.video_driving_ok, false, 'the no saved');
+        lock = driveLock(st);
+        assert.strictEqual(lock(true, true), true, 'restarted while moving after an on while moving: still no video');
+        assert.strictEqual(lock(true, false), false, 'parked with it on: video');
+        assert.strictEqual(vals.video_driving_ok, true, 'the parked yes saved');
+        lock = driveLock(st);   // the app restarts (an update) while driving
+        assert.strictEqual(lock(true, true), false, 'restarted while moving: the passenger keeps the picture');
+        assert.strictEqual(lock(false, true), true, 'switched off while moving: at once');
+        assert.strictEqual(vals.video_driving_ok, false);
+        assert.strictEqual(lock(true, true), true, 'switched on again while moving: does not count');
+        lock = driveLock(st);
+        assert.strictEqual(lock(true, true), true, 'nor after a restart');
+        vals.video_driving = false; vals.video_driving_ok = true;
+        assert.strictEqual(driveLock(st)(true, true), true, 'a saved yes without the setting on counts for nothing');
     }
 
     // first results: no thumb asked on its own (the screens ask for the tiles they draw: wantThumb), each asked once
