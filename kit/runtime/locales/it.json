@@ -218,6 +218,7 @@
   "For the full width, install Full-width touch from the MGU Store": "Per la larghezza piena, installa Full-width touch dal MGU Store",
   "Taps reach the screen's left edge": "I tocchi arrivano al bordo sinistro dello schermo",
   "Update yt-dlp by itself: the newest release, looked for daily (off: the one in this RideTube service)": "Aggiorna yt-dlp da solo: la versione più recente, cercata ogni giorno (disattivato: quella del servizio RideTube)",
+  "Use the MGU Store's proxy when one is set there (Settings → Proxy in the Store; off: direct)": "Usare il proxy di MGU Store se ne è impostato uno (Impostazioni → Proxy nello Store; disattivato: connessione diretta)",
   "What's new in RideTube {version}": "Novità di RideTube {version}",
   "Playlists and Watch later show all their videos, not just the first 15": "Playlist e Guarda dopo mostrano tutti i video, non solo i primi 15",
   "Hold -10 s or +10 s and it turns into previous or next video": "Tieni premuto -10 s o +10 s: diventa video precedente o successivo",

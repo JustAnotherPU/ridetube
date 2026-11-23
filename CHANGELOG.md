@@ -1,5 +1,22 @@
 # Changelog
 
+## App 0.6.1 and service 0.5.3
+
+RideTube can now use the proxy set in the MGU Store, for networks that block YouTube (#21).
+
+- Set the proxy in the MGU Store (Settings → Proxy, or its phone page): `http://host:port` or `socks5://host:port`,
+  with `user:password@` if the proxy needs one. RideTube reads the Store's setting and has no proxy address of its own.
+- RideTube has a new setting, "Use the MGU Store's proxy". Until you change it, it is on when the Store has a proxy
+  and off when it doesn't. After you switch it yourself, your choice stays. Off goes direct and leaves the Store's
+  proxy alone.
+- The proxy also does the name lookups, so the car's DNS doesn't matter. TLS still runs end to end to YouTube.
+- If a proxy is set and can't be used (wrong setting, proxy down, password refused), RideTube fails with an error that
+  names the proxy. It does not fall back to a direct connection. Diagnostics shows the proxy in the DNS and TLS rows.
+- Log reports leave out the proxy's address, user name and password.
+- The HTTP and SOCKS5 tunnels come from @istt1899's fork, and the parser for the setting from the MGU Store
+  (mgu-updater's `tunnel.js`).
+- Service 0.5.3 also includes the voice assistant pause from 0.5.2 (below), which was never released on its own.
+
 ## Service 0.5.2
 
 - A root-only pause for a voice assistant on the car (Majordome) while it listens: SIGWINCH does what the app's

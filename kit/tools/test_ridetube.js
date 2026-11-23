@@ -12,7 +12,7 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const { Ctl, Model, clock } = require('../../apps/jap_ridetube/yt');
+const { Ctl, Model, clock, followStoreProxy } = require('../../apps/jap_ridetube/yt');
 
 const quiet = { info() {}, warn() {}, error(m, e) { throw e || new Error(m); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -76,6 +76,44 @@ async function clientAndModel() {
     await until(() => m.ytdlp && m.ytdlp.unsupported, 2000, 'an older daemon');
     assert.strictEqual(m.error, null, 'not an error to show');
     m.setYtdlpAuto(true);
+
+    // the MGU Store's proxy (cap proxy): store by default, told once hello lists the cap and on a change; nothing without it
+    assert.strictEqual(d.cmds('proxy').length, 0, 'no proxy cap: not sent');
+    assert.ok(!m.setStoreProxy(true), 'no cap: kept, not sent');
+    d.send({ ev: 'hello', service: '0.5.3', caps: ['related', 'hist', 'health', 'ytdlp', 'proxy'] });
+    await lastIs(d, { cmd: 'proxy', mode: 'store' }, 'the Store\'s proxy by default, told once hello says proxy');
+    assert.ok(m.setStoreProxy(false));
+    await lastIs(d, { cmd: 'proxy', mode: 'off' }, 'off, told at once');
+    assert.ok(m.setStoreProxy(true));
+    await lastIs(d, { cmd: 'proxy', mode: 'store' }, 'back on');
+    const told = [];
+    m.onStoreProxy = (has) => told.push(has);
+    d.send({ ev: 'proxy', mode: 'store', store: true });
+    d.send({ ev: 'proxy', mode: 'off' });
+    await until(() => told.length === 2, 2000, 'the Store\'s proxy told to the switch');
+    assert.deepStrictEqual(told, [true, false], 'store true only when the daemon says so');
+    assert.strictEqual(m.error, null, 'the answer is no error');
+    m.onStoreProxy = null;
+
+    // the switch follows the Store until flipped (app.json default off: no proxy known yet)
+    {
+        const vals = { store_proxy: false }, fns = [], sent = [];
+        const st = { get: (k) => vals[k], set: (k, v) => { vals[k] = v; fns.forEach((f) => f(k, v)); } };
+        const mm = { setStoreProxy: (on) => sent.push(on) };
+        fns.push(followStoreProxy(st, mm));
+        assert.strictEqual(mm.storeProxy, true, 'not chosen: store (the Store\'s proxy when it has one)');
+        mm.onStoreProxy(true);
+        assert.deepStrictEqual([vals.store_proxy, vals.store_proxy_chosen, sent], [true, undefined, []], 'the Store has one: shown on, not a choice, nothing sent');
+        mm.onStoreProxy(false);
+        assert.deepStrictEqual([vals.store_proxy, vals.store_proxy_chosen], [false, undefined], 'cleared there: shown off');
+        st.set('store_proxy', true);   // the user flips it on
+        st.set('store_proxy', false);  // then off
+        assert.deepStrictEqual([vals.store_proxy_chosen, sent], [true, [true, false]], 'the user\'s flips: chosen, told');
+        mm.onStoreProxy(true);
+        assert.strictEqual(vals.store_proxy, false, 'chosen off: the Store no longer moves it');
+        const m2 = {}; followStoreProxy(st, m2);
+        assert.strictEqual(m2.storeProxy, false, 'chosen off kept at the next start: sent as off');
+    }
 
     // first results: no thumb asked on its own (the screens ask for the tiles they draw: wantThumb), each asked once
     assert.ok(m.search('first'));

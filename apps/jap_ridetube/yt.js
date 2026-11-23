@@ -139,6 +139,7 @@ class Model {
         this.resumeWait = false;     // a fresh play: its first tick says whether the service resumed it
         this.resumed = null;         // {id, ms, until}: "Resumed at 12:34 · Start over" shows until then
         this.ytdlpAuto = true;       // the yt-dlp updates setting, told to the daemon on every connect
+        this.storeProxy = true;      // "Use the MGU Store's proxy", told the same way (cap proxy)
         this.ytdlp = null;           // the daemon's {auto, version, bundled, checking}; {unsupported: true} from an older one
         this.library = [];           // the downloads (cap download): [{id, title, channel, duration_s, ready, pct?, error?, auto?}]
         this.autoDl = 0;             // the auto-download setting (0: off), told to the daemon on every connect
@@ -274,11 +275,14 @@ class Model {
             this.caps = Array.isArray(m.caps) ? m.caps.filter((x) => typeof x === 'string') : [];
             this.ev_clock(m);
             if (this.can('ytdlp')) this.send({ cmd: 'ytdlp', auto: this.ytdlpAuto });   // the setting, once the service says it has it
+            if (this.can('proxy')) this.send({ cmd: 'proxy', mode: this.storeProxy ? 'store' : 'off' });
             if (this.can('download')) { this.send({ cmd: 'library' }); this.send({ cmd: 'auto_download', max: this.autoDl }); }
         } else if (m.ev === 'time') {
             if (typeof m.elapsed === 'number') this.elapsed = m.elapsed;
             if (typeof m.total === 'number') this.total = m.total;
             this._resumeTick(Date.now());
+        } else if (m.ev === 'proxy') {
+            if (this.onStoreProxy) this.onStoreProxy(m.store === true);   // whether the Store has a proxy (the switch follows it)
         } else if (m.ev === 'ytdlp') {
             this.ytdlp = { auto: m.auto !== false, version: m.version || null, bundled: m.bundled || null, checking: !!m.checking };
         } else if (m.ev === 'error') {
@@ -416,6 +420,8 @@ class Model {
     quality(q) { return this.active() ? this.send({ cmd: 'quality', quality: q }) : false; }
     /** fill (crop to the screen) or fit (the whole picture) for the playing video */
     fill(on) { return this.active() ? this.send({ cmd: 'fill', on: !!on }) : false; }
+    /** the "Use the MGU Store's proxy" switch: kept for the next connect, told now when connected */
+    setStoreProxy(on) { this.storeProxy = !!on; return this.connected && this.can('proxy') ? this.send({ cmd: 'proxy', mode: this.storeProxy ? 'store' : 'off' }) : false; }
     /** the yt-dlp updates setting: kept for the next connect, told now when connected */
     setYtdlpAuto(on) { this.ytdlpAuto = !!on; return this.connected && this.can('ytdlp') ? this.send({ cmd: 'ytdlp', auto: this.ytdlpAuto }) : false; }
     /** (re)load the subscribed channels (the daemon keeps them 10 min); shown meanwhile */
@@ -586,4 +592,22 @@ function clock(ms) {
     return h ? h + ':' + p(m) + ':' + p(ss) : m + ':' + p(ss);
 }
 
-module.exports = { Ctl, Model, clock, SOCKET, FEEDS, FEED_MAX, SHELF_MAX };
+// "Use the MGU Store's proxy": until the user flips it the switch shows whether the Store has a proxy, and RideTube
+// uses it when there is one (mode store); once flipped, the choice holds (store_proxy_chosen). Returns the onChange part.
+function followStoreProxy(settings, model) {
+    let sync = false;
+    const chosen = () => settings.get('store_proxy_chosen') === true;
+    model.storeProxy = !chosen() || settings.get('store_proxy') === true;
+    model.onStoreProxy = (has) => {
+        if (chosen() || settings.get('store_proxy') === has) return;
+        sync = true;
+        try { settings.set('store_proxy', has); } finally { sync = false; }
+    };
+    return (key, value) => {
+        if (key !== 'store_proxy' || sync) return;
+        settings.set('store_proxy_chosen', true);
+        model.setStoreProxy(value === true);
+    };
+}
+
+module.exports = { Ctl, Model, clock, SOCKET, FEEDS, FEED_MAX, SHELF_MAX, followStoreProxy };

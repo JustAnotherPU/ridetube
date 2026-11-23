@@ -17,7 +17,7 @@ const FLOOR = 256 << 20;    // ytfetch.py's MIN_FREE: a fetch stops when less is
 const BUDGET_MS = 8000;     // the whole run (opts.healthMs overrides it); a local probe gets 3 s of it at most
 const TEXT_MAX = 120;
 // what ytfetch.py check --json may say in "info" (its _why): anything else shows as "failed"
-const PHRASES = ['loaded', 'resolved', 'no uplink lease', 'skipped: no DNS', 'name not resolved', 'timed out', 'certificate not trusted',
+const PHRASES = ['loaded', 'resolved', 'no uplink lease', 'skipped: no DNS', 'looked up by the proxy', 'proxy setting wrong', 'proxy failed', 'name not resolved', 'timed out', 'certificate not trusted',
     'TLS error', 'connection refused', 'connection reset', 'network unreachable', 'no route to host', 'not found', 'failed'];
 const phrase = (x) => (PHRASES.indexOf(x) >= 0 || /^(HTTP \d{3}|wrong clock: \d{4}-\d\d-\d\d)$/.test(x) ? x : 'failed');
 
@@ -54,6 +54,7 @@ function readLease(f) {
 function fetcherCheck(d, ms, put) {
     return new Promise(function (resolve, reject) {
         const clk = d.certTime();
+        const px = !!d.proxySetting();   // set (or wrong) in the Store, and on in RideTube: the rows say so
         const child = d.spawnFetchUid(d.opts.fetcher, ['check', '--json', '--cache-dir', d.opts.cacheDir, '--lease', d.opts.leaseFile].concat(clk ? ['--no-cert-time'] : []));
         let size = 0, lastErr = '', done = false;
         const kill = function () { try { child.kill('SIGKILL'); } catch (e) { /* gone */ } };
@@ -71,9 +72,11 @@ function fetcherCheck(d, ms, put) {
                 const v = /^[\w.+-]{1,32}$/.test(String(o.version)) ? String(o.version) : null;
                 put('ytdlp', ok && !!v, ok && v ? 'yt-dlp ' + v + ' (bundled)' : 'yt-dlp does not load: ' + info);
             } else if (o.name === 'dns') {
-                put('dns', ok, ok ? 'youtube.com resolves through the uplink DNS' : 'DNS for youtube.com: ' + info);
+                put('dns', ok, info === 'looked up by the proxy' && ok ? 'youtube.com is looked up by the Store\'s proxy'
+                    : ok ? 'youtube.com resolves through the uplink DNS' : 'DNS for youtube.com: ' + info + (px ? ' (the Store\'s proxy)' : ''));
             } else if (o.name === 'tls') {
-                put('tls', ok, !ok ? 'no TLS to youtube.com: ' + info : clk ? 'TLS to youtube.com works with the certificate date check skipped: wrong clock (' + clk + ')' : 'TLS to youtube.com works');
+                put('tls', ok, (!ok ? 'no TLS to youtube.com: ' + info : clk ? 'TLS to youtube.com works with the certificate date check skipped: wrong clock (' + clk + ')' : 'TLS to youtube.com works')
+                    + (px ? ' (through the Store\'s proxy)' : ''));
             }
         });
         child.on('close', function (code) {

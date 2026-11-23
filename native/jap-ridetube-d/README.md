@@ -168,7 +168,7 @@ App → daemon (every `case` of `onLine` in `ytd.js`, no more, no fewer: `test_y
 
 | cmd | |
 |---|---|
-| `{"cmd":"hello","app":"0.4.0","lang":"ru","region":"RU"}` | → `hello` `{service, caps, clock?}`. `lang` (`^[a-z]{2}$`) and `region` (`^[A-Z]{2}$`) are optional; one that does not match is dropped (logged), never refused. Both hold for this connection only, kept for the `hl` / `gl` of its feed, search and related requests. `caps` lists only what this build really answers, from the frozen names `health`, `related`, `hist`, `ytdlp`, `remote`, `proxy`, `stream`, `download`; this build: `related`, `hist`, `health`, `remote`, `ytdlp`, `download`, and `stream` where the videos go to RAM (below, "Videos in RAM"). A service older than 0.4.0 answers `error` `unknown cmd hello`: the app reads that as no caps |
+| `{"cmd":"hello","app":"0.4.0","lang":"ru","region":"RU"}` | → `hello` `{service, caps, clock?}`. `lang` (`^[a-z]{2}$`) and `region` (`^[A-Z]{2}$`) are optional; one that does not match is dropped (logged), never refused. Both hold for this connection only, kept for the `hl` / `gl` of its feed, search and related requests. `caps` lists only what this build really answers, from the frozen names `health`, `related`, `hist`, `ytdlp`, `remote`, `proxy`, `stream`, `download`; this build: `related`, `hist`, `health`, `remote`, `ytdlp`, `download`, `proxy`, and `stream` where the videos go to RAM (below, "Videos in RAM"). A service older than 0.4.0 answers `error` `unknown cmd hello`: the app reads that as no caps |
 | `{"cmd":"status"}` | → `state` (and `time` when known) |
 | `{"cmd":"search","q":".."}` | → `results` (InnerTube), or `error` `empty search` / `search offline` |
 | `{"cmd":"thumb","id":".."}` | → `thumb` (cache `thumb.rgba` first, else `thumb.js` on the car; nothing if neither works, or if the length is neither 57600 nor 230400) |
@@ -198,7 +198,7 @@ App → daemon (every `case` of `onLine` in `ytd.js`, no more, no fewer: `test_y
 | `{"cmd":"download","id":"..","meta":{"title","channel","duration_s"},"quality":q}` | 0.5.0, cap `download`: keeps the video on the car (`cache/saved/<id>`, root's) → `library`. Fetched one at a time by `ytfetch.py fetch` as the fetch uid, into the video's folder as a play fetches it, at `quality`'s height (as `play`); never while a play starts, plays or is paused (a play stops the download, which starts again from scratch later), and only with 4 GB free in the cache's file system (else its item says `not enough space`). After 3 failures (1 for a refused video) it is given up: `download failed` (asked again: tried again). Kept until `remove`: the cleanup after a play and the thumbnails' cap skip it. A downloaded video plays from its files, with no network. `meta` (the tile's) names it until the fetch's own `meta.json` |
 | `{"cmd":"remove","id":".."}` | 0.5.0, cap `download`: forgets the download, stops it if it is being fetched, deletes its files (the one playing: once it stops) and its thumbnail → `library` |
 | `{"cmd":"auto_download","max":N}` | 0.5.0, cap `download`: auto-downloads (kept in `state/autodl.json`; absent: off): `max` 0 (off) to 10, the newest Subscriptions videos not watched to the end (no Shorts, live or members-only videos, up to 1 hour), looked for every 30 min while signed in and on Wi-Fi (the uplink lease's `wlan*`: never on phone data, never with no lease) → `{"ev":"auto_download","max"}`. Their items carry `auto: true`; one goes once watched, when newer videos push it out, or when `max` goes down |
-| `{"cmd":"proxy","mode":"off\|wireproxy\|tailscale"}` | later, not yet implemented, cap `proxy` (WP11): → `{"ev":"net","proxy","ok"}`; until then `error` `not implemented proxy` |
+| `{"cmd":"proxy","mode":"store\|off"}` | 0.5.3, cap `proxy`: the app's "Use the MGU Store's proxy" switch. `store` (the default) uses the Store's proxy when one is set there, `off` goes direct; kept in `state/proxy.json` → `{"ev":"proxy","mode","store"}` (`store`: whether the Store has a proxy set, a wrong one included; also sent when that changes, so the app's switch can follow the Store until the user flips it). Any other mode: `error` `bad proxy mode`. Only on or off: the address is the Store's alone (below, "Through the MGU Store's proxy"), so no client of the socket can send the account's traffic somewhere else |
 
 A command not in this table: `{"ev":"error","msg":"unknown cmd <cmd>"}`. A command of the table whose package has not
 landed: `{"ev":"error","cmd":"<cmd>","msg":"not implemented <cmd>"}`; the app sends none of them unless `hello` listed its cap.
@@ -237,6 +237,7 @@ Daemon → app:
   Popular...), as `feed`.
 - `{"ev":"playlists",..}`, `{"ev":"playlist",..}`, `{"ev":"logs_sent",..}`, `{"ev":"logs_error",..}`: below.
 - 0.4.0 / 0.4.1, cap-gated: `{"ev":"health",..}`, `{"ev":"related",..}`, `{"ev":"ytdlp",..}` (shapes in the table).
+- 0.5.3, cap `proxy`: `{"ev":"proxy","mode":"store|off","store":bool}`, the answer to `proxy` and whenever a proxy is set or cleared in the Store (the table).
 - 0.4.1: `{"ev":"remote","on","url","expires"}` (above); `{"ev":"remote_do","do":"search|play","q"|"id"}`: a phone action
   the app carries out itself (the parked rule and the screen stay the app's): `q` a search (≤ 200 characters), `id` a
   video id (`ID_RE`), both checked again by root. Not yet implemented: `{"ev":"net","proxy","ok"}`.
@@ -288,8 +289,8 @@ re-arms nothing. Asks for a feed while its browse is in flight share that browse
 
 `mgu-uplink` lets out only the uids it lists, never root. Every youtube.com request runs in a child,
 `node --max-http-header-size=65536 ytd.js --fetch`, spawned as the daemon's own fetch uid (gid the same
-number, empty env, cwd `/`). The request, with the secret, tokens and body, goes on the child's stdin
-(never argv or env: `ps` shows those); `{status, body}` or `{error}` comes back on its stdout. 10 s
+number, an env holding only the Store's proxy when one is set (below), cwd `/`). The request, with the secret,
+tokens and body, goes on the child's stdin (never argv: `ps` shows it); `{status, body}` or `{error}` comes back on its stdout. 10 s
 timeout (a log report: 30 s; the child is killed 1 s after), 8 MiB body. Plain `http:` only to 127.0.0.1 or
 localhost (the tests' fake relay); any other URL goes out over TLS. The child never touches the account file.
 While the head unit's clock is wrong (below, "Security notes") the child is `ytfetch.py request --no-cert-time`
@@ -312,6 +313,37 @@ It is written to `state/internet-uids` (component.json `"internet": true, "uids"
 "state/internet-uids"`: the deploy tool copies it into `/var/opt/mgu-uplink/uids.d/jap-ridetube-d`) and,
 while the uplink is installed, straight into that drop-in (the uplink rescans every 5 s). The unit
 starts node with `--max-http-header-size=65536`: the TV page's headers pass 8 kB.
+
+### Through the MGU Store's proxy
+
+Where YouTube is blocked or slow on the car's network, RideTube goes out through the proxy set in the MGU Store
+(Settings → **Proxy**, or its phone page): `http://host:port` (HTTP `CONNECT`) or `socks5://host:port`, with
+`user:password@` when it wants one. RideTube has only an on/off switch ("Use the MGU Store's proxy": until the user flips it,
+it shows on when the Store has a proxy and off when not; off goes direct and leaves the Store's own proxy alone; a flip, like a Store change, applies to the next request), never an address of its own. The Store keeps it in
+`/var/opt/mgu-updater/updater.local.conf` (`proxy = ...`, 0600 root), and the daemon reads that line again at each
+fetch-uid spawn, so a change applies to the next request (the warm `serve` spare is dropped). `proxy.js` parses it
+with the Store's own rules (`tunnel.js` in mgu-updater), so a setting the Store takes is one RideTube takes.
+
+- Every request goes through it: sign-in, feeds, search, SponsorBlock and log reports (`ytRequest`), thumbnails
+  (`thumb.js`), and in `ytfetch.py` yt-dlp (its `proxy`, `socks5h://` so the proxy looks names up), the audio and
+  video ranges, the RAM window, covers, yt-dlp updates and the health check (`socket.create_connection` patched).
+- Names are looked up by the proxy, never on the car: with a proxy set `ytfetch.py` refuses to resolve any name
+  but the proxy's own. TLS runs through the tunnel to YouTube itself, with the usual certificate checks.
+- Fail closed: a setting that cannot be read or parsed, or a proxy that is down or refuses, fails each request
+  with an error naming the proxy by host:port (`proxy 192.168.8.1:7891: user name or password refused`). Only an
+  absent or empty setting goes direct.
+- The children get it as `RT_PROXY` (JSON: kind, host, port, user, password) or `RT_PROXY_ERROR` in their env:
+  `/proc/<pid>/environ` is readable by the fetch uid and root only, the uid that gets the account's token on stdin
+  anyway, and one value reaches every helper, stdin or not. The log says `network: through socks5 host:port` or
+  `network: direct`; a log report drops the proxy's host, user name and password. The health check's DNS and TLS
+  rows say `the Store's proxy`.
+- Read from `/var/opt/mgu-updater/updater.local.conf` only, where the Store's Settings and phone page write it.
+  shortcut: a `proxy` put by hand in the Store's version-folder `updater.conf`, or a local conf moved with
+  `local_conf` / `MGU_UPDATER_CONF`, is not seen (RideTube goes direct); read those too if anyone sets it there.
+- `mgu-uplink` lets the fetch uid out over IPv4 on the uplink interface: a proxy on the car's own network (a
+  router, a computer running Clash) or on the internet works; an IPv6-only proxy does not.
+- The tunnels come from istt1899's fork (github.com/istt1899/ridetube, `proxy.js`), the parser from the MGU Store.
+  Tests: `node test/test_proxy.js`, `python3.12 -I test/test_proxy.py` (fake CONNECT and SOCKS5 proxies here).
 
 ## Log reports (`send_logs`)
 
@@ -452,6 +484,8 @@ JSON block of the page that its script reads. The trust boundaries:
     node test/test_ytd.js           # fake someip, fake ytdec, fake fetcher, fake youtube.com, fake nft (the phone remote)
     node test/test_thumb.js         # Node 22+: ffmpeg-made JPEGs (baseline, resampled, progressive via jpegtran); online part skipped offline
     python3.12 -I test/test_ytfetch.py   # ffmpeg fixtures, local Range server (head MP4, ranged == one stream); online part skipped offline
+    node test/test_proxy.js         # the Store's proxy: parse, conf, env, CONNECT and SOCKS5 tunnels, fail closed
+    python3.12 -I test/test_proxy.py     # the same in ytfetch.py: every connection through it, no local name lookup
     python3 -I test/test_stream.py       # WP8: window, retries, sidx and Cues, a demux from a fragment, punching, the RAM/flash/whole plan
     python3 -I test/live_stream.py $PWD/ytfetch.py $PWD/build/ytdlp.pyz   # WP8, online: streamed and restreamed == a whole fetch
     MGU_STORE=... ./build.sh [path/to/ytdec]   # → dist/jap-ridetube-d@<version>.tgz (default ../ytdec/build/target/ytdec)

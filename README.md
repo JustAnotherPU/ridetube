@@ -200,6 +200,7 @@ Thanks to everyone whose code is in RideTube:
   and the command-sequence tests, from their fork.
 - @JackieZ123430 (小白151): the Simplified Chinese translation.
 - @Asksket: Close ends the video and goes back to the list.
+- @istt1899: the HTTP and SOCKS5 tunnels used for the MGU Store's proxy, from their fork.
 - @7amoody1985: streaming the playing video in a window that follows playback, and seeks and resumes that start
   where you are, from #20.
 

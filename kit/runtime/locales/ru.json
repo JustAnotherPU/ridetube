@@ -218,6 +218,7 @@
   "For the full width, install Full-width touch from the MGU Store": "Для полной ширины установите Full-width touch из MGU Store",
   "Taps reach the screen's left edge": "Касания доходят до левого края экрана",
   "Update yt-dlp by itself: the newest release, looked for daily (off: the one in this RideTube service)": "Обновлять yt-dlp самостоятельно: новейший выпуск, проверка раз в день (выкл.: тот, что в службе RideTube)",
+  "Use the MGU Store's proxy when one is set there (Settings → Proxy in the Store; off: direct)": "Использовать прокси MGU Store, если он задан (Настройки → Прокси в Store; выкл.: напрямую)",
   "What's new in RideTube {version}": "Что нового в RideTube {version}",
   "Playlists and Watch later show all their videos, not just the first 15": "Плейлисты и «Смотреть позже» показывают все видео, а не только первые 15",
   "Hold -10 s or +10 s and it turns into previous or next video": "Удерживайте -10 с или +10 с: кнопка станет предыдущим или следующим видео",

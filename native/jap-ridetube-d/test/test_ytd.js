@@ -1862,7 +1862,7 @@ async function main() {
     const flogDir = path.join(tmp, 'flog');
     fs.mkdirSync(flogDir); fs.chmodSync(flogDir, 0o777); fs.chmodSync(tmp, 0o711);
     const flog = path.join(flogDir, 'fetch.log');
-    const fo = (mode) => ({ noSetuid: !root, fetchCmd: [process.execPath, fakeFetch, flog, mode] });
+    const fo = (mode) => ({ noSetuid: !root, childEnv: {}, fetchCmd: [process.execPath, fakeFetch, flog, mode] });
     const req = { method: 'POST', url: 'https://www.youtube.com/o/oauth2/token', headers: { Authorization: 'Bearer ACCESS-1' },
         body: { client_secret: 'SeCrEt-1', refresh_token: 'REFRESH-1' }, timeoutMs: 300 };
 
@@ -1888,7 +1888,7 @@ async function main() {
     });
 
     await t('the real helper (ytd.js --fetch): a request it cannot make comes back as an error', async () => {
-        const o = { noSetuid: !root, fetchCmd: [process.execPath, '--max-http-header-size=65536', path.join(__dirname, '..', 'ytd.js'), '--fetch'] };
+        const o = { noSetuid: !root, childEnv: {}, fetchCmd: [process.execPath, '--max-http-header-size=65536', path.join(__dirname, '..', 'ytd.js'), '--fetch'] };
         await rejects(fetchRequest(o, me, { method: 'GET', url: 'https://127.0.0.1:1/', headers: null, body: null, timeoutMs: 3000 }), /ECONNREFUSED/);
     });
 
@@ -2392,7 +2392,7 @@ async function main() {
 
     await t('hello: service version and caps; lang / region kept for the connection; a bad one dropped, never refused', async () => {
         const FROZEN = ['health', 'related', 'hist', 'ytdlp', 'remote', 'proxy', 'stream', 'download'];
-        assert.deepStrictEqual(CAPS, ['related', 'hist', 'health', 'remote', 'ytdlp', 'download'], 'what of the protocol answers for real (WP1: related, hist; WP4: health; WP9: remote; WP6: ytdlp; 0.5.0: download)');
+        assert.deepStrictEqual(CAPS, ['related', 'hist', 'health', 'remote', 'ytdlp', 'download', 'proxy'], 'what of the protocol answers for real (WP1: related, hist; WP4: health; WP9: remote; WP6: ytdlp; 0.5.0: download; 0.5.3: proxy, store or off)');
         assert.ok(CAPS.every((x) => FROZEN.indexOf(x) >= 0), 'caps only from the frozen names');
         c.clear();
         c.send({ cmd: 'hello', app: '0.4.0', lang: 'ru', region: 'RU' });
@@ -2474,12 +2474,13 @@ async function main() {
         assert.ok(l.argv.join(' ').indexOf('Bearer') < 0, 'secrets on stdin only');
     });
 
-    await t('the frozen commands not built yet answer "not implemented <cmd>"; an unknown one as before', async () => {
-        for (const m of [{ cmd: 'proxy', mode: 'off' }]) {
-            c.clear();
-            c.send(m);
-            assert.deepStrictEqual(await c.waitFor((x) => x.ev === 'error'), { ev: 'error', cmd: m.cmd, msg: 'not implemented ' + m.cmd });
-        }
+    await t('proxy: store or off only, told back; an unknown command as before', async () => {
+        c.clear();
+        c.send({ cmd: 'proxy', mode: 'socks5://evil:1' });
+        assert.deepStrictEqual(await c.waitFor((x) => x.ev === 'error'), { ev: 'error', cmd: 'proxy', msg: 'bad proxy mode' });
+        c.clear();
+        c.send({ cmd: 'proxy', mode: 'store' });
+        assert.deepStrictEqual(await c.waitFor((x) => x.ev === 'proxy'), { ev: 'proxy', mode: 'store', store: false }, 'no Store conf on this machine');
         c.clear();
         c.send({ cmd: 'bogus' });
         assert.deepStrictEqual(await c.waitFor((x) => x.ev === 'error'), { ev: 'error', msg: 'unknown cmd bogus' });

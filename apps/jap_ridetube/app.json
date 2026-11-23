@@ -2,7 +2,7 @@
   "id": "jap_ridetube",
   "title": "RideTube",
   "description": "Video in the car: an unofficial client for YouTube. Your Home, Subscriptions, Watch later, History and playlists (signed in on the car), search, channels and chapters; the sound through the car's media player, the picture only while parked (a podcast view while driving). Needs the jap-ridetube-d tool.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "license": "GPL-3.0-or-later",
   "vendor": "custom",
   "loggingId": "OAA6",
@@ -428,6 +428,12 @@
       "label": "Update yt-dlp by itself: the newest release, looked for daily (off: the one in this RideTube service)",
       "type": "bool",
       "default": true
+    },
+    {
+      "key": "store_proxy",
+      "label": "Use the MGU Store's proxy when one is set there (Settings → Proxy in the Store; off: direct)",
+      "type": "bool",
+      "default": false
     },
     {
       "key": "battery",

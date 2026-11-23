@@ -620,6 +620,184 @@ def _is_ip(h):
     return False
 
 
+# ---------------------------------------------------------------- the MGU Store's proxy
+# The daemon reads the Store's `proxy` setting (proxy.js) and gives it to every fetch-uid child as RT_PROXY (JSON:
+# kind http|socks5, host, port, user, pass, label) or RT_PROXY_ERROR. With one, every connection ytfetch.py makes
+# itself goes through the proxy (socket.create_connection, which http.client and urllib use), yt-dlp gets it as its
+# `proxy`, and no name is looked up here but the proxy's own: the proxy looks them up. A wrong setting fails every
+# connection; it never goes direct. The tunnels follow istt1899's fork (github.com/istt1899/ridetube, GPL-3.0).
+PROXY = None
+_PROXY_SET = False
+
+
+def proxy_child_env():
+    """PROXY as a child's env again (check's fetch child): os.environ no longer has it."""
+    if PROXY is None:
+        return {}
+    if 'error' in PROXY:
+        return {'RT_PROXY_ERROR': PROXY['error']}
+    return {'RT_PROXY': json.dumps({k: PROXY[k] for k in ('kind', 'host', 'port', 'user', 'pass', 'label')})}
+
+
+class ProxyError(OSError):
+    pass
+
+
+def proxy_env(env=None):
+    env = os.environ if env is None else env
+    if env.get('RT_PROXY_ERROR'):
+        return {'error': str(env['RT_PROXY_ERROR'])[:200]}
+    raw = env.get('RT_PROXY')
+    if not raw:
+        return None
+    try:
+        p = json.loads(raw)
+        if p.get('kind') not in ('http', 'socks5') or not isinstance(p.get('host'), str) or not 0 < int(p['port']) < 65536:
+            raise ValueError('bad')
+        return {'kind': p['kind'], 'host': p['host'], 'port': int(p['port']), 'user': str(p.get('user') or ''),
+                'pass': str(p.get('pass') or ''), 'label': str(p.get('label') or p['host'])}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return {'error': 'proxy setting unreadable'}
+
+
+def proxy_url(p):
+    """yt-dlp's proxy: socks5h, so the proxy looks the names up (yt-dlp's socks5:// looks them up here)."""
+    q = lambda x: urllib.parse.quote(x, safe='')  # noqa: E731
+    auth = f"{q(p['user'])}:{q(p['pass'])}@" if p['user'] or p['pass'] else ''
+    host = f"[{p['host']}]" if ':' in p['host'] else p['host']
+    return f"{'socks5h' if p['kind'] == 'socks5' else 'http'}://{auth}{host}:{p['port']}"
+
+
+def _recv_exact(sock, n):
+    b = b''
+    while len(b) < n:
+        d = sock.recv(n - len(b))
+        if not d:
+            raise ProxyError('connection closed')
+        b += d
+    return b
+
+
+SOCKS_REPLIES = ['', 'general failure', 'not allowed by its rules', 'network unreachable', 'host unreachable',
+                 'connection refused', 'TTL expired', 'command not supported', 'address type not supported']
+
+
+def _socks5(sock, p, host, port):
+    auth = bool(p['user'] or p['pass'])
+    sock.sendall(b'\x05\x01\x02' if auth else b'\x05\x01\x00')
+    ver, method = _recv_exact(sock, 2)
+    if ver != 5:
+        raise ProxyError('not a SOCKS5 proxy')
+    if method == 2 and auth:
+        u, pw = p['user'].encode(), p['pass'].encode()
+        sock.sendall(bytes([1, len(u)]) + u + bytes([len(pw)]) + pw)
+        if _recv_exact(sock, 2)[1] != 0:
+            raise ProxyError('user name or password refused')
+    elif method != 0:
+        raise ProxyError('it takes no user name and password' if auth else 'it wants a user name and password')
+    try:
+        dst = b'\x01' + socket.inet_pton(socket.AF_INET, host)
+    except OSError:
+        try:
+            dst = b'\x04' + socket.inet_pton(socket.AF_INET6, host)
+        except OSError:
+            h = host.encode('idna')
+            if len(h) > 255:
+                raise ProxyError('host name over 255 bytes') from None
+            dst = bytes([3, len(h)]) + h  # the proxy looks the name up
+    sock.sendall(b'\x05\x01\x00' + dst + struct.pack('>H', port))
+    hdr = _recv_exact(sock, 4)
+    if hdr[0] != 5:
+        raise ProxyError('not a SOCKS5 proxy')
+    if hdr[1] != 0:
+        raise ProxyError(SOCKS_REPLIES[hdr[1]] if hdr[1] < len(SOCKS_REPLIES) else f'refused (code {hdr[1]})')
+    if hdr[3] == 1:
+        _recv_exact(sock, 4 + 2)
+    elif hdr[3] == 4:
+        _recv_exact(sock, 16 + 2)
+    elif hdr[3] == 3:
+        _recv_exact(sock, _recv_exact(sock, 1)[0] + 2)
+    else:
+        raise ProxyError('bad answer')
+
+
+def _connect(sock, p, host, port):
+    target = f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
+    auth = ''
+    if p['user'] or p['pass']:
+        import base64
+        auth = 'Proxy-Authorization: Basic ' + base64.b64encode(f"{p['user']}:{p['pass']}".encode()).decode() + '\r\n'
+    sock.sendall(f'CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n{auth}\r\n'.encode())
+    head = b''
+    while b'\r\n\r\n' not in head:  # byte by byte: what follows the head is the tunnel's (TLS)
+        if len(head) > 8192:
+            raise ProxyError('answer too long')
+        head += _recv_exact(sock, 1)
+    m = re.match(rb'HTTP/\d\.\d\s+(\d{3})', head)
+    if not m:
+        raise ProxyError('not an HTTP proxy')
+    code = m.group(1).decode()
+    if code == '407':
+        raise ProxyError('user name or password refused')
+    if code != '200':
+        raise ProxyError(f'CONNECT refused (HTTP {code})')
+
+
+def tunnel(p, host, port, timeout=None, source_address=None):
+    """A socket to host:port through the proxy p, the caller's timeout kept for the handshake and after."""
+    if 'error' in p:
+        raise ProxyError(p['error'])
+    t = timeout if isinstance(timeout, (int, float)) else 30
+    try:
+        sock = _create_connection((p['host'], p['port']), t, source_address)
+    except OSError as e:
+        raise ProxyError(f"proxy {p['label']}: {e.strerror or e}") from None
+    try:
+        (_socks5 if p['kind'] == 'socks5' else _connect)(sock, p, host, int(port))
+        sock.settimeout(timeout if isinstance(timeout, (int, float)) else None)
+        return sock
+    except socket.timeout:
+        sock.close()
+        raise ProxyError(f"proxy {p['label']}: no answer") from None
+    except ProxyError as e:
+        sock.close()
+        raise ProxyError(f"proxy {p['label']}: {e}") from None
+    except BaseException:
+        sock.close()
+        raise
+
+
+_create_connection = socket.create_connection
+_LOCAL = ('127.0.0.1', 'localhost', '::1')
+
+
+def _name_allowed(h):
+    """With a proxy, the only name looked up here is the proxy's own (and this machine's)."""
+    return PROXY is None or h in _LOCAL or _is_ip(h) or ('error' not in PROXY and h == PROXY['host'])
+
+
+def install_proxy(p):
+    global PROXY
+    PROXY = p
+    if p is None:
+        return
+    orig = socket.getaddrinfo
+
+    def create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **kw):
+        h = address[0].decode() if isinstance(address[0], bytes) else address[0]
+        if h in _LOCAL or ('error' not in p and h == p['host']):
+            return _create_connection(address, timeout, source_address, **kw)
+        return tunnel(p, h, address[1], timeout, source_address)
+
+    def getaddrinfo(host, port, *args, **kw):
+        h = host.decode() if isinstance(host, bytes) else host
+        if h and not _name_allowed(h):
+            raise socket.gaierror(socket.EAI_NONAME, f'{h}: looked up by the proxy only')
+        return orig(host, port, *args, **kw)
+    socket.create_connection = create_connection
+    socket.getaddrinfo = getaddrinfo
+
+
 def install_dns(lease):
     """The system resolver answers no internet names on the car: ask the uplink's DNS servers."""
     if getattr(socket.getaddrinfo, '_lease', None) == lease:  # serve installed it
@@ -633,6 +811,8 @@ def install_dns(lease):
         h = host.decode() if isinstance(host, bytes) else host
         if not h or h == 'localhost' or _is_ip(h) or family == socket.AF_INET6:
             return orig(host, port, family, type, proto, flags)
+        if not _name_allowed(h):
+            raise socket.gaierror(socket.EAI_NONAME, f'{h}: looked up by the proxy only')
         if h not in cache:
             cache[h] = resolve_a(h, servers)
         p = int(port or 0)  # shortcut: service names ('https') unsupported, urllib/yt-dlp pass numbers
@@ -1451,7 +1631,13 @@ def ydl_params(a, fmt, hook=None):
             # the API's default is no retry: one 20 s stall (googlevideo pacing) ended the video; a retry resumes it
             'retries': 10, 'socket_timeout': 30,
             'js_runtimes': {'node': {'path': a.node}}, 'remote_components': [],
-            'progress_hooks': [hook] if hook else []}
+            'progress_hooks': [hook] if hook else []} | ydl_proxy()
+
+
+def ydl_proxy():
+    """The Store's proxy for yt-dlp (its own connections skip socket.create_connection). A wrong setting: none, and
+    the name guard (install_proxy) fails its lookups, so it cannot go direct either."""
+    return {'proxy': proxy_url(PROXY)} if PROXY and 'error' not in PROXY else {}
 
 
 # visionos: avc1 https + AAC 140, no PO token, no JS solve, no tv_samsung ad wait (5 s); measured 2026-11-03
@@ -1912,8 +2098,11 @@ def check(a):
     t = time.monotonic()
     servers = install_dns(a.lease)
     try:
-        ips = socket.getaddrinfo('www.youtube.com', 443)
-        line('dns', bool(servers), t, f"{ips[0][4][0]} via {servers or 'system resolver (no lease)'}")
+        if PROXY:  # the proxy looks the names up: nothing to resolve here
+            line('dns', 'error' not in PROXY, t, PROXY.get('error') or f"looked up by the proxy {PROXY['label']}")
+        else:
+            ips = socket.getaddrinfo('www.youtube.com', 443)
+            line('dns', bool(servers), t, f"{ips[0][4][0]} via {servers or 'system resolver (no lease)'}")
     except OSError as e:
         line('dns', False, t, e)
     t = time.monotonic()
@@ -1949,7 +2138,7 @@ def check(a):
            '--height', str(a.height), '--node', a.node, '--lease', a.lease] + (['--pyz', a.pyz] if a.pyz else []) + \
         ([] if cert_time else ['--no-cert-time']) + (['--avc1'] if a.avc1 else [])
     t = time.monotonic()
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, env={}, cwd='/')
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, env=proxy_child_env(), cwd='/')
     t_audio = t_head = t_lead = t_dl = None  # t_dl: first progress event, after yt-dlp's 'sleep as required by the site'
     rate20, last = 0, {}
     for raw in p.stdout:
@@ -1991,6 +2180,8 @@ def _why(e):
         e = e.reason
     if isinstance(e, urllib.error.HTTPError):
         return f'HTTP {e.code}'
+    if isinstance(e, ProxyError):
+        return 'proxy failed'
     if isinstance(e, ssl.SSLCertVerificationError):
         return 'wrong clock: ' + time.strftime('%Y-%m-%d', time.gmtime()) if clock_wrong(e) else 'certificate not trusted'
     for kind, phrase in ((ssl.SSLError, 'TLS error'), ((socket.timeout, TimeoutError), 'timed out'),
@@ -2024,9 +2215,14 @@ def check_json(a):
     servers = install_dns(a.lease)
     resolved = False
     try:
-        socket.getaddrinfo('www.youtube.com', 443)
-        resolved = True
-        line('dns', bool(servers), t, 'resolved' if servers else 'no uplink lease', servers=len(servers))
+        if PROXY:  # the proxy looks the names up: TLS is tried whatever this row says
+            resolved = True
+            line('dns', 'error' not in PROXY, t, 'proxy setting wrong' if 'error' in PROXY else 'looked up by the proxy',
+                 servers=len(servers))
+        else:
+            socket.getaddrinfo('www.youtube.com', 443)
+            resolved = True
+            line('dns', bool(servers), t, 'resolved' if servers else 'no uplink lease', servers=len(servers))
     except OSError as e:
         line('dns', False, t, _why(e), servers=len(servers))
     t = time.monotonic()
@@ -2307,6 +2503,14 @@ def main(argv=None):
         fail('--start-ms, --video-only and --video-dir go with --stream')
     global cert_time
     cert_time = not a.no_cert_time
+    global _PROXY_SET
+    if not _PROXY_SET:  # once: serve runs main() again for its job
+        _PROXY_SET = True
+        install_proxy(proxy_env())
+        os.environ.pop('RT_PROXY', None)  # yt-dlp starts node with this env: the password stays here
+        os.environ.pop('RT_PROXY_ERROR', None)
+    if PROXY and 'error' in PROXY and a.cmd in ('fetch', 'extract', 'serve', 'update'):
+        fail(PROXY['error'])  # yt-dlp gets no proxy then, and an IP-literal URL would pass the name guard
     if a.cmd == 'request':
         install_dns(a.lease)
         return request_cmd()

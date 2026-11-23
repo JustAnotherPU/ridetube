@@ -15,6 +15,7 @@ const https = require('https');
 const crypto = require('crypto');
 const cp = require('child_process');
 const readline = require('readline');
+const proxy = require('./proxy.js');
 
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const isVid = (id) => typeof id === 'string' && ID_RE.test(id);   // (String(['x...']) would pass ID_RE, then break path.join)
@@ -25,13 +26,13 @@ const MEDIA_FILES = ['audio.m4a', 'index.bin', 'video.h264'];
 const VIDEO_DIR_MODE = 0o711;
 // thumb.rgba length -> [w, h]: 160x90 in caches from older proxies, 320x180 since 0.1.6
 const THUMB_SIZES = { 57600: [160, 90], 230400: [320, 180] };
-const VERSION = '0.5.2';   // component.json's (test_ytd.js checks): sent with a log report
+const VERSION = '0.5.3';   // component.json's (test_ytd.js checks): sent with a log report
 // the day this build was released (UTC), bumped with VERSION at each release (tools/release.py refuses one in the
 // future). A head unit clock before it is provably wrong: only then does TLS skip the certificate dates (certTime)
 const BUILT = '2026-11-21';
 // what `hello` says this build answers for real. The frozen names: health, related, hist (feed hist|liked), ytdlp,
 // remote, proxy, stream, download (library, download, remove, auto_download). A package adds its name here (through the integrator) once its command works
-const CAPS = ['related', 'hist', 'health', 'remote', 'ytdlp', 'download'];
+const CAPS = ['related', 'hist', 'health', 'remote', 'ytdlp', 'download', 'proxy'];
 const LANG_RE = /^[a-z]{2}$/, REGION_RE = /^[A-Z]{2}$/;   // hello's lang ("ru") and region ("RU")
 // the log relay (send_logs posts <REPORT_URL>/v1/report): the only place reports go. MGU_YT_REPORT_URL or opts.reportUrl override it
 const REPORT_URL = 'https://ridetube-logs.ridetube-relay.workers.dev';
@@ -77,6 +78,7 @@ function defaults() {
         warmMs: 600000,      // ... for this long after the app's last command
         infoMaxMs: 1500000,
         leaseFile: '/run/mgu-uplink/lease.json',
+        storeConf: proxy.STORE_CONF,   // the MGU Store's settings: its `proxy` line carries RideTube's traffic too (proxy.js)
         ytdlpFirstMs: 120000,      // yt-dlp updates (ytfetch.py update): looked for this long after start,
         ytdlpEveryMs: 86400000,    // ... then once a day,
         ytdlpRetryMs: 3600000,     // ... an hour after a failed look, and after a failed play once this long has passed
@@ -361,14 +363,15 @@ function pickUid(o, key) {
 }
 function pickFetchUid(o) { return pickUid(o, 'fetch'); }
 // one request in a child as uid (fetchCmd: ytd.js --fetch). The request, secrets and all, goes on its stdin
-// (argv and env show in ps); {status, body} or {error} comes back on its stdout. Killed past the timeout.
+// (argv shows in ps; o.childEnv, the proxy, is the env); {status, body} or {error} comes back on its stdout. Killed past the timeout.
 function fetchRequest(o, uid, req) {
     return new Promise(function (resolve, reject) {
+        if (!o.childEnv) return reject(new Error('fetchRequest: no childEnv (the proxy setting)'));
         let child;
         try {
             // (o.noSetuid: tests not run as root, which cannot switch uid)
             const ids = o.noSetuid ? {} : { uid: uid, gid: uid };
-            child = cp.spawn(o.fetchCmd[0], o.fetchCmd.slice(1), Object.assign(ids, { cwd: '/', env: {}, stdio: ['pipe', 'pipe', 'ignore'] }));
+            child = cp.spawn(o.fetchCmd[0], o.fetchCmd.slice(1), Object.assign(ids, { cwd: '/', env: o.childEnv || {}, stdio: ['pipe', 'pipe', 'ignore'] }));
         } catch (e) { return reject(e); }
         const chunks = [];
         let size = 0, done = false;
@@ -415,8 +418,9 @@ const FEED_MAX = 100;   // a feed's, channel's, playlist's, search's or related 
 const PLAYLIST_MAX = 1000; // a playlist's (and Watch later's, Liked's) videos, ~150 B each on the line, read 15 a page
 const PAGES_MAX = 70;      // next pages read for one playlist (70 x 15 > PLAYLIST_MAX); shortcut: a longer playlist stops at PLAYLIST_MAX
 
-// method, url, headers, body (JSON or null) -> {status, body (utf8)}; no redirects (none seen on these URLs)
-function ytRequest(method, url, headers, body, timeoutMs, lookup) {
+// method, url, headers, body (JSON or null) -> {status, body (utf8)}; no redirects (none seen on these URLs).
+// via (proxy.js fromEnv's): the TLS goes through its tunnel, the name looked up there; { error } fails every request
+function ytRequest(method, url, headers, body, timeoutMs, lookup, via) {
     return new Promise(function (resolve, reject) {
         const u = require('url').parse(url);
         const data = body ? Buffer.from(JSON.stringify(body)) : null;
@@ -426,25 +430,38 @@ function ytRequest(method, url, headers, body, timeoutMs, lookup) {
         const fail = function (e) { if (!done) { done = true; clearTimeout(timer); reject(e); } };
         // plain http only to this machine (a test's fake relay); any other http: URL still goes out as TLS
         const loop = u.protocol === 'http:' && /^(127\.0\.0\.1|localhost)$/.test(u.hostname);
-        const req = (loop ? require('http') : https).request({ hostname: u.hostname, port: u.port, path: u.path, method: method, headers: h, lookup: lookup }, function (res) {
-            const chunks = [];
-            res.on('data', function (c) {
-                size += c.length;
-                if (size > 8 << 20) { fail(new Error('answer too big')); req.abort(); return; }
-                chunks.push(c);
+        let req = null;
+        const start = function (cc) {
+            if (done) return;
+            // a custom connection has no agent to give the default port: Host would say :80 (istt1899's fork found it)
+            const o = { hostname: u.hostname, port: u.port, path: u.path, method: method, headers: h, lookup: lookup };
+            if (cc) Object.assign(o, { port: Number(u.port) || 443, defaultPort: 443, createConnection: cc });
+            req = (loop ? require('http') : https).request(o, function (res) {
+                const chunks = [];
+                res.on('data', function (c) {
+                    size += c.length;
+                    if (size > 8 << 20) { fail(new Error('answer too big')); req.abort(); return; }
+                    chunks.push(c);
+                });
+                res.on('end', function () {
+                    if (done) return;
+                    done = true;
+                    clearTimeout(timer);
+                    resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
+                });
+                res.on('error', fail);
             });
-            res.on('end', function () {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
-            });
-            res.on('error', fail);
+            req.on('error', fail);
+            if (data) req.write(data);
+            req.end();
+        };
+        const timer = setTimeout(function () { fail(new Error('timeout')); if (req) req.abort(); }, timeoutMs || 10000);
+        if (!via || loop) return start(null);
+        return proxy.connect(via, u.hostname, Number(u.port) || 443, { timeoutMs: timeoutMs || 10000, lookup: lookup }, function (e, sock) {
+            if (e) return fail(e);
+            if (done) return sock.destroy();
+            return start(function () { return require('tls').connect({ socket: sock, servername: u.hostname }); });
         });
-        const timer = setTimeout(function () { fail(new Error('timeout')); req.abort(); }, timeoutMs || 10000);
-        req.on('error', fail);
-        if (data) req.write(data);
-        req.end();
     });
 }
 
@@ -1282,6 +1299,8 @@ function redactLog(text, k, salt, cacheDir) {
     longest(k.titles || [], 6).forEach((x) => { s = s.split(x).join('[title]'); });
     const ids = k.ids || {};
     longest(Object.keys(ids), 10).forEach((x) => { s = s.split(x).join(tag(ids[x], x)); });
+    // the Store's proxy by context, at any length and whichever it was: "through socks5 <host:port>", "proxy <host:port>:"
+    s = s.replace(/(\bnetwork: through \w+ |\bproxy )(\[[0-9a-f:.]+\]|[^\s:\[\]]+):\d{1,5}\b/gi, '$1[proxy]');
     // tokens, cookies, e-mails
     s = s.replace(/\b(Bearer|OAuth)\s+[\w.~+\/-]+=*/gi, '$1 [secret]')
         .replace(/\bya29\.[\w.-]+/g, '[secret]').replace(/\b1\/\/[\w.-]{20,}/g, '[secret]')
@@ -1414,8 +1433,9 @@ Daemon.prototype.fetch = function (req) {
     try {
         // sign-in (refresh token, client secret) never crosses date-unchecked TLS: it fails with the clock error
         // instead, which is not invalid_grant, so the account stays signed in for when the clock is set
-        if (/^https:\/\/[^/]+\/o\/oauth2\//.test(String(req.url || '')) || !this.certTime()) return fetchRequest(this.opts, this.uid(), req);
-        const o = Object.assign({}, this.opts, { fetchCmd: this.opts.fetcher.concat(['request', '--no-cert-time', '--cache-dir', this.ytc(), '--lease', this.opts.leaseFile]) });
+        const env = { childEnv: this.proxyEnv() };
+        if (/^https:\/\/[^/]+\/o\/oauth2\//.test(String(req.url || '')) || !this.certTime()) return fetchRequest(Object.assign({}, this.opts, env), this.uid(), req);
+        const o = Object.assign({}, this.opts, env, { fetchCmd: this.opts.fetcher.concat(['request', '--no-cert-time', '--cache-dir', this.ytc(), '--lease', this.opts.leaseFile]) });
         return fetchRequest(o, this.uid(), Object.assign({}, req, { headers: Object.assign({ 'User-Agent': TV_UA }, req.headers || {}) }));
     } catch (e) { return Promise.reject(e); }
 };
@@ -1446,8 +1466,27 @@ Daemon.prototype.feedPos = function (ms, now) {
 };
 Daemon.prototype.spawnFetchUid = function (cmd, args, stdin) {
     const ids = this.opts.noSetuid ? {} : { uid: this.uid(), gid: this.uid() };
-    return cp.spawn(cmd[0], cmd.slice(1).concat(args), Object.assign(ids, { cwd: '/', env: {}, stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] }));
+    return cp.spawn(cmd[0], cmd.slice(1).concat(args), Object.assign(ids, { cwd: '/', env: this.proxyEnv(), stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] }));
 };
+// The Store's proxy as every fetch-uid child's env (proxy.js toEnv), read again at each spawn: a change in the Store
+// applies to the next request. A change drops the spare (its yt-dlp was set up with the old one) and is logged by
+// host:port alone; a setting that is wrong fails every request (never direct, which would bypass what the user set),
+// unless the app's switch is off: then direct, whatever the Store holds.
+Daemon.prototype.proxySetting = function () {
+    const raw = proxy.readSetting(this.opts.storeConf), s = this.proxyMode() === 'off' ? null : raw;
+    const key = JSON.stringify(proxy.toEnv(s));   // a new password counts as a change too
+    if (key !== this.proxyKey) {
+        if (this.proxyKey !== undefined) this.dropSpare();
+        this.proxyKey = key;
+        this.log('network: ' + (!s ? 'direct' : s.error ? s.error : 'through ' + s.proxy.kind + ' ' + s.proxy.label) + (s ? ' (the Store\'s proxy setting)'
+            : this.proxyMode() === 'off' ? ' (the Store\'s proxy is off in RideTube)' : ''));
+    }
+    // the app's switch follows the Store until the user flips it: told when a proxy is set or cleared there
+    const set = raw !== null;
+    if (set !== this.proxyStore) { const told = this.proxyStore !== undefined; this.proxyStore = set; if (told) this.emit({ ev: 'proxy', mode: this.proxyMode(), store: set }); }
+    return s;
+};
+Daemon.prototype.proxyEnv = function () { return proxy.toEnv(this.proxySetting()); };
 // yt-dlp's cache dir (5 chars: listCache's 11-char id filter skips it), the fetch uid's. Root makes and chowns only
 // this folder (in root's cache/, so it cannot be swapped); everything below it (info/, yt-dlp's files) is the fetcher's
 Daemon.prototype.ytc = function () {
@@ -1561,6 +1600,7 @@ Daemon.prototype.skipSegments = function () {
 // (~2.5 s) runs while the controller rests on a tile (prefetch), so a play skips both
 Daemon.prototype.spawnJob = function (job) {
     if (this.certTime()) job = [job[0], '--no-cert-time'].concat(job.slice(1));
+    this.proxySetting();   // a Store proxy change since the spare started drops it
     const s = this.spare;
     this.spare = null;
     if (s && s.child.exitCode === null && s.child.signalCode === null) { // still loading: serve reads the job once warm
@@ -1579,6 +1619,8 @@ Daemon.prototype.keepWarm = function () {
         return;
     }
     if (this.spare || (this.preparing && this.state === 'preparing')) return;
+    const px = this.proxySetting();
+    if (px && px.error) return;   // serve stops at once on a wrong proxy setting: no spare, or one would start every tick
     let child;
     try { child = this.spawnFetchUid(this.opts.fetcher, ['serve', '--cache-dir', this.ytc()].concat(this.pyzArgs()), true); } catch (e) { this.log('spare: ' + e.message); return; }
     const s = this.spare = { child: child, warm: false };
@@ -1990,7 +2032,7 @@ Daemon.prototype.onLine = function (line) {
     case 'health': return this.health();
     case 'related': return this.related(m.id);
     case 'remote': return this.remote(m.on, m.lang);   // 0.4.1
-    case 'proxy': return this.proxy(m.mode);   // later
+    case 'proxy': return this.proxy(m.mode);
     case 'library': return this.sendLibrary();   // 0.5.0
     case 'download': return this.download(m.id, m.meta, m.quality);
     case 'remove': return this.remove(m.id);
@@ -2050,7 +2092,24 @@ Daemon.prototype.remoteUid = function () {
     if (this.webUid === null || this.webUid === this.fetchUid) throw new Error('no web uid on the car (see the log)');
     return this.webUid;
 };
-Daemon.prototype.proxy = function (mode) { return this.notImplemented('proxy'); };            // WP11, later
+// The app's "Use the MGU Store's proxy" setting: store (the default) or off (direct, the Store's proxy left to the
+// Store). Only on or off: the address is the Store's alone. Kept in state/proxy.json, told back as {ev:'proxy', mode}
+Daemon.prototype.proxy = function (mode) {
+    if (mode !== 'store' && mode !== 'off') return this.emit({ ev: 'error', cmd: 'proxy', msg: 'bad proxy mode' });
+    if (mode !== this.proxyMode()) {
+        this.proxyModeOn = mode;
+        try { if (!fs.existsSync(this.opts.stateDir)) { mkdirp(path.dirname(this.opts.stateDir)); fs.mkdirSync(this.opts.stateDir, 0o700); } writeIfChanged(path.join(this.opts.stateDir, 'proxy.json'), JSON.stringify({ mode: mode }) + '\n', 0o644); } catch (e) {
+            this.log('proxy: ' + e.message);
+            if (mode === 'store') try { fs.unlinkSync(path.join(this.opts.stateDir, 'proxy.json')); } catch (e2) { /* none: store */ }   // never an old off after a restart
+        }
+    }
+    this.proxySetting();   // logs a change, drops the spare, knows whether the Store has a proxy
+    return this.emit({ ev: 'proxy', mode: this.proxyMode(), store: this.proxyStore });
+};
+Daemon.prototype.proxyMode = function () {
+    if (this.proxyModeOn === undefined) { const s = readJson(path.join(this.opts.stateDir, 'proxy.json')); this.proxyModeOn = s && s.mode === 'off' ? 'off' : 'store'; }
+    return this.proxyModeOn;
+};
 Daemon.prototype.setState = function (s) {
     if (s !== 'paused' && this.micHeld) { clearTimeout(this.micHeld.timer); this.micHeld = null; }   // played, stopped, failed: no longer the hold's pause
     this.state = s;
@@ -2368,6 +2427,10 @@ Daemon.prototype.known = function () {
     walk(readJson(this.opts.accountFile));
     walk(this.account.cred);
     walk(this.account.pending);
+    // the Store's proxy: its host, user name and password (raw and as written in a URL) stay out of reports
+    const px = proxy.readSetting(this.opts.storeConf);
+    const quoted = (x) => encodeURIComponent(x).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());   // Python's quote(safe='')
+    if (px && px.proxy) [px.proxy.user, px.proxy.pass].forEach((x) => { if (x) secrets.push(x, encodeURIComponent(x), quoted(x)); });
     const vid = (id) => { if (ID_RE.test(String(id))) ids[id] = 'v'; };
     const meta = (m) => { [m.title, m.channel].forEach((x) => { if (typeof x === 'string' && x !== m.id) titles.push(x); }); };
     if (this.cur) { vid(this.cur.id); meta(this.cur); }
@@ -3400,7 +3463,7 @@ if (require.main === module && process.argv[2] === '--someip-gen') {
     process.stdin.on('end', () => {
         let q;
         try { q = JSON.parse(input); } catch (e) { return out({ error: 'bad request' }); }
-        return ytRequest(q.method, q.url, q.headers, q.body, q.timeoutMs, uplinkLookup()).then(out, (e) => out({ error: e.message }));
+        return ytRequest(q.method, q.url, q.headers, q.body, q.timeoutMs, uplinkLookup(), proxy.fromEnv()).then(out, (e) => out({ error: e.message }));
     });
 } else if (require.main === module) {
     const d = new Daemon();

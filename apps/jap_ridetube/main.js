@@ -73,7 +73,7 @@ const { setImage } = require('./kit/record');
 const { HMI } = require('./kit/display');
 const Parked = require('./kit/parked');
 const { Touchpad, TouchMode, MODE: PAD_MODE } = require('./kit/touchpad');
-const { Ctl, Model, clock, SOCKET, FEEDS, SHELF_MAX } = require('./yt');
+const { Ctl, Model, clock, SOCKET, FEEDS, SHELF_MAX, followStoreProxy } = require('./yt');
 const { spell } = require('./speller');
 
 const W = 1600, H = 520;
@@ -151,8 +151,9 @@ mgu.run({
         const model = new Model((o) => ctl.send(o), JSON.parse(helloSent));
         // yt-dlp updates (the daemon fetches the newest yt-dlp release itself): the setting, told on connect and on a change
         model.ytdlpAuto = settings.get('ytdlp_auto') !== false;
+        const proxySwitch = followStoreProxy(settings, model);   // the MGU Store's proxy for RideTube too (the address is the Store's)
         model.autoDl = Number(settings.get('auto_download')) || 0;   // (0.6.0) new Subscriptions videos kept on the car, on Wi-Fi
-        settings.onChange((key, value) => { if (key === 'ytdlp_auto') model.setYtdlpAuto(value !== false); if (key === 'auto_download') model.setAutoDl(value); });
+        settings.onChange((key, value) => { if (key === 'ytdlp_auto') model.setYtdlpAuto(value !== false); proxySwitch(key, value); if (key === 'auto_download') model.setAutoDl(value); });
         let mode = 'home', browse = 'home', dirty = true;   // browse: the list the player goes back to
         const changed = () => { dirty = true; if (ctx.background) ctx.background('playing', model.active()); labels(); };
         const isFeed = (m) => FEEDS.indexOf(m) >= 0;

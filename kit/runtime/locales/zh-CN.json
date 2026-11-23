@@ -250,6 +250,7 @@
   "For the full width, install Full-width touch from the MGU Store": "如需全宽显示，请从 MGU Store 安装 Full-width touch",
   "Taps reach the screen's left edge": "触摸可到达屏幕左边缘",
   "Update yt-dlp by itself: the newest release, looked for daily (off: the one in this RideTube service)": "自动更新 yt-dlp：每天检查最新版本（关闭：使用本 RideTube 服务自带的版本）",
+  "Use the MGU Store's proxy when one is set there (Settings → Proxy in the Store; off: direct)": "使用 MGU Store 设置的 Proxy（Store：设置 → Proxy；关闭：直接连接）",
   "What's new in RideTube {version}": "RideTube {version} 新功能",
   "Playlists and Watch later show all their videos, not just the first 15": "播放列表和稍后观看会显示全部视频，不再只有前 15 个",
   "Hold -10 s or +10 s and it turns into previous or next video": "按住 -10 秒或 +10 秒，按钮会变成上一个或下一个视频",
