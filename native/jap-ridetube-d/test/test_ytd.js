@@ -2525,6 +2525,44 @@ async function main() {
         assert.strictEqual(ytCalls('/browse').length, 0, 'nothing asked without an account');
     });
 
+    // car, 2026-11-23: watched to 22:40 on an iPad, played here from Continue watching: the car's own older 12:30 won
+    await t('resume: the furthest of the car\'s position and YouTube\'s (the tile\'s at, else the History); History slow or signed out: the car\'s', async () => {
+        const id = 'RESUMEYT001', was = d.opts.resume;
+        mkVideo(id);
+        const at = (s) => { const x = tile(id, V, 'Long one', 'Chan R', '1:00'); x.tileRenderer.onSelectCommand.watchEndpoint.startTimeSeconds = s; return x; };
+        const hist = (s) => browsePage([{ shelfRenderer: { content: { horizontalListRenderer: { items: [at(s)] } } } }]);
+        const start = async (carMs, play, done) => {
+            d.positions()[id] = { ms: carMs, total: 60000, done: !!done, at: Date.now() };
+            calls.length = 0; yt.calls.length = 0; c.clear();
+            c.send(Object.assign({ cmd: 'play', id: id, rect: '1280x720' }, play));
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'playing', 5000);
+            subs.playerState('PLAYER_STATE_PLAY');
+            tick(500);
+            await waitUntil(() => called('setTime').length);
+            const ms = called('setTime')[0].a.newTimeElapsed;
+            c.send({ cmd: 'stop' });
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'idle');
+            return [ms, ytCalls('/browse').map((x) => x.body.browseId)];
+        };
+        d.opts.resume = true;
+        try {
+            signIn();
+            yt.browse = (h, b) => ok(b.browseId === 'FEhistory' ? hist(40) : {});
+            assert.deepStrictEqual(await start(20000), [40000, ['FEhistory']], 'no at: the History\'s, further');
+            assert.deepStrictEqual(await start(50000), [50000, ['FEhistory']], 'the car further: the car\'s');
+            assert.deepStrictEqual(await start(20000, { at: 30000 }), [30000, []], 'the tile\'s at, further: no History asked');
+            assert.deepStrictEqual(await start(45000, { at: 30000 }), [45000, []], 'the car further than the tile');
+            assert.deepStrictEqual(await start(59000, undefined, true), [40000, ['FEhistory']], 'watched to the end here: YouTube\'s');
+            yt.slow = { '/youtubei/v1/browse': 3000 };
+            const logs0 = logs.length;
+            assert.deepStrictEqual((await start(20000))[0], 20000, 'History slow: the car\'s, after 2.5 s');
+            assert.ok(logs.slice(logs0).some((m) => /resume: history timed out/.test(m)), logs.slice(logs0).join('|'));
+            yt.slow = null;
+            signOut();
+            assert.deepStrictEqual(await start(20000), [20000, []], 'signed out: nothing asked');
+        } finally { d.opts.resume = was; yt.slow = null; signOut(); delete d.positions()[id]; }
+    });
+
     await t('related: the watch-next tiles (real TVHTML5 /next), the video itself left out; anonymous signed out; kept 10 min per video and language; offline; bad id', async () => {
         signOut();
         const id = 'aqz-KE-bpKQ';

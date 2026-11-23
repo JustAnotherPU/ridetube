@@ -1,5 +1,15 @@
 # Changelog
 
+## App 0.6.4 and service 0.5.4
+
+Resuming a video now picks up where you last stopped, even if that was on another device.
+
+- A video starts at the later of two points: where you left it in the car, and where YouTube has you from your phone, tablet or TV. Before, the car's own position always won, so a video you had watched further on an iPad started again at the older point saved in the car.
+- Videos opened from Continue watching carry no YouTube position. When you are signed in, the service now looks the video up in your YouTube history and waits at most 2.5 seconds for it. Signed out, or with no answer in time, the video starts where the car left it.
+- A video you finished in the car but are partway through on YouTube resumes at YouTube's point instead of at the start.
+- The resume notice is now two buttons. "Resumed at 22:40" keeps playing from there and closes the notice, and "Start over" goes back to the beginning. Before, the whole notice was one button, and pressing it always started over.
+- The notice stays 10 seconds instead of 5, which leaves time to choose.
+
 ## App 0.6.3
 
 - Video while driving now stays available when the app restarts while the car is moving, for example after an update

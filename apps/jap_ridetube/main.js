@@ -508,15 +508,20 @@ mgu.run({
             return ex.segments.find((g) => sbMode(g[2]) === 'ask' && t >= g[0] && t < g[1] - 1000) || null;
         }
         const sbJump = (g) => () => model.skip(g[1] - shownAt());
-        // "Resumed at 12:34 · Start over" for 5 s after a play the service resumed (a notice, nothing to answer): a press
-        // goes back to the start. Drawn by the player and podcast mode where the kit runs the screen; true when drawn
+        // two buttons for 10 s after a play the service resumed: "Resumed at 12:34" (keep it, the notice goes) and
+        // "Start over" (back to the start). Drawn by the player and podcast mode where the kit runs the screen; true when drawn
         function resumePill(cv, x, y, h, size, tg, run) {
             const r = model.resumedNow(Date.now());
             if (!r) return false;
-            const tt = whole('Resumed at {time}', { time: clock(r.ms) }) + ' · ' + whole('Start over'), w = cv.textWidth(tt, size, LITB) + h, f = focusKey === 'ov:resume';
-            cv.roundRect(x, y, w, h, h / 2, f ? '#ffffff' : '#3a3a3ae6');
-            cv.text(tt, x + h / 2, y + Math.round(h / 2 + size * 0.36), size, f ? '#0f0f0f' : '#ffffff', LITB);
-            tg(x, y, w, h, run(() => model.startOver()), 'ov:resume', h / 2);
+            const pill = (tt, key, fn) => {
+                const w = cv.textWidth(tt, size, LITB) + h, f = focusKey === key;
+                cv.roundRect(x, y, w, h, h / 2, f ? '#ffffff' : '#3a3a3ae6');
+                cv.text(tt, x + h / 2, y + Math.round(h / 2 + size * 0.36), size, f ? '#0f0f0f' : '#ffffff', LITB);
+                tg(x, y, w, h, run(fn), key, h / 2);
+                x += w + Math.round(h / 3);
+            };
+            pill(whole('Resumed at {time}', { time: clock(r.ms) }), 'ov:resume', () => { model.resumed = null; });
+            pill(whole('Start over'), 'ov:startover', () => model.startOver());
             return true;
         }
 

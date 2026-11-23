@@ -1316,7 +1316,7 @@ function wp5Model() {
     m.play('RRRRRRRRRRR', '1x1', false);
     m.onMsg({ ev: 'state', state: 'playing', id: 'RRRRRRRRRRR' }); m.onMsg({ ev: 'time', elapsed: 754000, total: 1200000 });
     const now = Date.now(), r = m.resumedNow(now);
-    assert.ok(r && r.ms === 754000 && r.until - now <= 5000 && r.until - now > 4000 && !m.resumedNow(now + 5100), 'resumed at 12:34, shown 5 s');
+    assert.ok(r && r.ms === 754000 && r.until - now <= 10000 && r.until - now > 9000 && !m.resumedNow(now + 10100), 'resumed at 12:34, shown 10 s');
     m.startOver(); assert.deepStrictEqual([sent.pop(), m.resumedNow(now)], [{ cmd: 'seek', ms: 0 }, null], 'Start over: seek 0, the notice gone');
     m.quality('480'); m.onMsg({ ev: 'state', state: 'preparing', id: 'RRRRRRRRRRR' }); m.onMsg({ ev: 'state', state: 'playing', id: 'RRRRRRRRRRR' });
     m.onMsg({ ev: 'time', elapsed: 300000, total: 1200000 });
@@ -1428,12 +1428,23 @@ async function wp5Frames(x) {
     parked();
     d.send({ ev: 'state', state: 'playing', id: 'RESUME00001', title: 'Lecture' }); d.send({ ev: 'time', elapsed: 754000, total: 1200000 });
     await sleep(100); await drawn();
-    assert.ok(texts.indexOf('Resumed at 12:34 · Start over') >= 0 && tgt('ov:resume'), 'the notice: ' + keys());
+    assert.ok(texts.indexOf('Resumed at 12:34') >= 0 && texts.indexOf('Start over') >= 0 && tgt('ov:resume') && tgt('ov:startover'), 'two buttons: ' + keys());
+    const n0 = d.cmds('seek').length;
     tgt('ov:resume').run();
+    await drawn();
+    assert.ok(!tgt('ov:resume') && !tgt('ov:startover'), 'Resumed at: the notice goes');
+    assert.strictEqual(d.cmds('seek').length, n0, 'and it plays on from 12:34');
+    d.send({ ev: 'state', state: 'idle' }); await sleep(50);
+    hu.handlers.BTN_RESULTS(); await drawn();
+    tgt(/^r:\d+:RESUME00001$/).run();
+    await until(() => plays().filter((x) => x === 'RESUME00001').length === 2, 2000, 'played again');
+    d.send({ ev: 'state', state: 'playing', id: 'RESUME00001', title: 'Lecture' }); d.send({ ev: 'time', elapsed: 754000, total: 1200000 });
+    await sleep(100); await drawn();
+    tgt('ov:startover').run();
     await lastIs(d, { cmd: 'seek', ms: 0 }, 'Start over seeks to 0');
     await drawn();
-    assert.ok(!tgt('ov:resume'), 'and the notice goes');
-    console.log('ok   WP5 resume notice: Resumed at 12:34 · Start over, a press seeks to 0');
+    assert.ok(!tgt('ov:resume') && !tgt('ov:startover'), 'and the notice goes');
+    console.log('ok   WP5 resume notice: two buttons, Resumed at 12:34 plays on, Start over seeks to 0');
     // the wheel's next, first match wins: an asked segment; the list's next; the next chapter; the first related video
     d.send({ ev: 'results', q, items: [{ id: 'WHEEL000001', title: 'One', channel: 'C', duration_s: 600 }, { id: 'WHEEL000002', title: 'Two', channel: 'C', duration_s: 600 }] });
     await sleep(100);

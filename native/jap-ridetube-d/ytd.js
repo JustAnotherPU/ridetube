@@ -26,7 +26,7 @@ const MEDIA_FILES = ['audio.m4a', 'index.bin', 'video.h264'];
 const VIDEO_DIR_MODE = 0o711;
 // thumb.rgba length -> [w, h]: 160x90 in caches from older proxies, 320x180 since 0.1.6
 const THUMB_SIZES = { 57600: [160, 90], 230400: [320, 180] };
-const VERSION = '0.5.3';   // component.json's (test_ytd.js checks): sent with a log report
+const VERSION = '0.5.4';   // component.json's (test_ytd.js checks): sent with a log report
 // the day this build was released (UTC), bumped with VERSION at each release (tools/release.py refuses one in the
 // future). A head unit clock before it is provably wrong: only then does TLS skip the certificate dates (certTime)
 const BUILT = '2026-11-21';
@@ -882,6 +882,12 @@ Account.prototype.feed = function (which) {
         this.feeding[which].then(done, done);
     }
     return this.feeding[which];
+};
+// where the account left video `id` (ms, from its History's first page), or 0: what another device watched to
+Account.prototype.resumeAt = async function (id) {
+    const r = await this.browse(FEEDS.hist, await this.token(false));
+    const it = r.status === 200 && r.j ? feedItems(r.j).filter((x) => x.id === id)[0] : null;
+    return it && it.start_s > 0 ? it.start_s * 1000 : 0;
 };
 Account.prototype.loadFeed = async function (which) {
     const g = this.gen;
@@ -2558,8 +2564,13 @@ Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, resto
     if (!/^\d{2,4}x\d{2,4}$/.test(String(rect))) rect = '1280x720';
     const own = restore || { ms: 0, paused: false, height: qualityHeight(quality, readJson(this.opts.leaseFile)) };
     this.restart = own;
+    // no YouTube position on the tile (Continue watching): ask the account's History, 2.5 s at most, meanwhile the stop
+    const ask = !restore && this.opts.resume && !(Number(at) > 10000) && this.account.load()
+        ? withTimeout(this.account.resumeAt(id), 2500, 'history').catch((e) => { this.log('resume: ' + e.message); return 0; }) : null;
     await Promise.all([this.stop(null), this.stopDownload()]);   // playing always wins: a download starts again later
     if (this.restart !== own) return undefined;   // stopped, or replaced, while the one before stopped
+    if (ask) at = await ask;
+    if (this.restart !== own) return undefined;
     if (own.fill !== undefined) fill = own.fill;
     const gen = ++this.gen;
     const dir = path.join(this.opts.cacheDir, id);
@@ -2572,8 +2583,8 @@ Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, resto
     this.cur = { id: id, title: meta0.title, durationMs: meta0.duration_s > 0 ? meta0.duration_s * 1000 : undefined, dir: dir, rect: rect, fill: fill, gen: gen, height: qualityHeight(quality, readJson(this.opts.leaseFile)),
         skip: Array.isArray(skip) ? skip.filter((x) => typeof x === 'string') : null, chapters: chapters };
     const was = this.positions()[id];
-    // where it was left (here, else YouTube's own position the tile carried: at): seek there on the first tick
-    if (!restore && !own.sought) own.ms = !this.opts.resume ? 0 : was ? (!was.done && was.ms > 10000 ? was.ms : 0) : (Number(at) > 10000 ? Math.floor(Number(at)) : 0);
+    // the furthest of where it was left here and YouTube's own position (at: another device's): seek there on the first tick
+    if (!restore && !own.sought) own.ms = !this.opts.resume ? 0 : Math.max(was && !was.done && was.ms > 10000 ? was.ms : 0, Number(at) > 10000 ? Math.floor(Number(at)) : 0);
     this.posAt = Date.now();
     this.pct = 0;
     this.fetchedMs = Infinity;

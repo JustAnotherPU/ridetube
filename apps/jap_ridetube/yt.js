@@ -538,11 +538,11 @@ class Model {
     }
     /** the clock went wrong or right again (hello's clock, then clock events): a date as YYYY-MM-DD, else none */
     ev_clock(m) { this.clock = typeof m.clock === 'string' && /^\d{4}-\d\d-\d\d$/.test(m.clock) ? m.clock : null; }
-    /** a fresh play's first tick past 10 s while playing: the service resumed it there (5 s notice, Start over) */
+    /** a fresh play's first tick past 10 s while playing: the service resumed it there (10 s notice: Resumed at, Start over) */
     _resumeTick(now) {
         if (!this.resumeWait || this.state !== 'playing') return;
         this.resumeWait = false;
-        if (this.elapsed > 10000) this.resumed = { id: this.id, ms: this.elapsed, until: now + 5000 };
+        if (this.elapsed > 10000) this.resumed = { id: this.id, ms: this.elapsed, until: now + 10000 };
     }
     /** the resume notice to show now, or null */
     resumedNow(now) {
