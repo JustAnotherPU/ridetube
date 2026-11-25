@@ -1488,7 +1488,6 @@ Daemon.prototype.spawnFetchUid = function (cmd, args, stdin) {
 // unless the app's switch is off: then direct, whatever the Store holds.
 Daemon.prototype.proxySetting = function () {
     if (this.vlessKey) {
-        if (!this.xrayReady && !this.xrayStarting) this.startXray().catch((e) => this.log('VLESS: start failed (' + e.message + ')'));
         const s = this.xrayReady ? { proxy: proxy.parse('socks5://127.0.0.1:' + this.opts.xrayPort) } : { error: 'VLESS proxy is starting or unavailable' };
         const key = JSON.stringify(proxy.toEnv(s));
         if (key !== this.proxyKey) { if (this.proxyKey !== undefined) this.dropSpare(); this.proxyKey = key; this.log('network: ' + (s.error || 'through RideTube VLESS (local SOCKS5)')); }
