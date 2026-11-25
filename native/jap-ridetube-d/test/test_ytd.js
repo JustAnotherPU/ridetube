@@ -502,7 +502,7 @@ async function main() {
         assert.strictEqual(ours().length, 0);
     });
 
-    const fetchLog = () => JSON.parse(fs.readFileSync(ctl + '.log', 'utf8'));
+    const fetchLog = () => { const raw = fs.readFileSync(ctl + '.log', 'utf8'); if (!raw.trim()) return null; try { return JSON.parse(raw); } catch (_) { return null; } };
     const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return false; } };
     const fetchPlay = async (id) => {
         c.clear();
@@ -3289,7 +3289,7 @@ async function main() {
         const pid = fetchLog().pid;
         setMode('codec');
         d.child.kill('SIGKILL');                                 // death 1: the new ytdec reads the (VP9) index: exit 4
-        await waitUntil(() => { const log = fetchLog(); return !!log && log.pid !== pid; }, 4000);
+        await waitUntil(() => { const log = fetchLog(); return !!log && log.pid && log.pid !== pid; }, 4000);
         assert.deepStrictEqual(fetchLog().argv.slice(1, 7), ['fetch', '--cache-dir', path.join(cache, 'ytdlp'), '--height', '720', '--avc1']);
         await c.waitFor((x) => x.ev === 'state' && x.state === 'playing', 4000);
         await sleep(100); tick(0);
@@ -3322,7 +3322,7 @@ async function main() {
             c.clear(); calls.length = 0;
             c.send({ cmd: 'play', id: 'VP9CODEC003', rect: '1280x720', at: 30000 });
             await c.waitFor((x) => x.ev === 'state' && x.state === 'playing', 4000);
-            await waitUntil(() => fetchLog().argv.indexOf('--avc1') > 0, 4000);   // no tick yet: still the start's place
+            await waitUntil(() => { const log = fetchLog(); return !!log && Array.isArray(log.argv) && log.argv.indexOf('--avc1') > 0; }, 4000);   // no tick yet: still the start's place
             await c.waitFor((x) => x.ev === 'state' && x.state === 'playing' && c.evs.filter((y) => y.state === 'playing').length === 2, 4000);
             await sleep(100); tick(0);
             await waitUntil(() => called('setTime').length > 0);
