@@ -240,6 +240,8 @@ Daemon → app:
 - `{"ev":"playlists",..}`, `{"ev":"playlist",..}`, `{"ev":"logs_sent",..}`, `{"ev":"logs_error",..}`: below.
 - 0.4.0 / 0.4.1, cap-gated: `{"ev":"health",..}`, `{"ev":"related",..}`, `{"ev":"ytdlp",..}` (shapes in the table).
 - 0.5.3, cap `proxy`: `{"ev":"proxy","mode":"store|off","store":bool}`, the answer to `proxy` and whenever a proxy is set or cleared in the Store (the table).
+- `{"ev":"vless_list",...}`: VLESS profile-list/selection response from the phone remote; profile URIs and credentials are never returned.
+- `{"ev":"vless_select",...}`: VLESS profile-list/selection response from the phone remote; profile URIs and credentials are never returned.
 - 0.4.1: `{"ev":"remote","on","url","expires"}` (above); `{"ev":"remote_do","do":"search|play","q"|"id"}`: a phone action
   the app carries out itself (the parked rule and the screen stay the app's): `q` a search (≤ 200 characters), `id` a
   video id (`ID_RE`), both checked again by root. Not yet implemented: `{"ev":"net","proxy","ok"}`.
