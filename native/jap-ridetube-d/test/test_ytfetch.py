@@ -1001,7 +1001,7 @@ def online():
         return False
 
 
-@unittest.skipUnless(online() and os.path.isfile(PYZ), 'no network or no build/ytdlp.pyz')
+@unittest.skipUnless(os.environ.get('RUN_YOUTUBE_ONLINE_TESTS') == '1' and online() and os.path.isfile(PYZ), 'online YouTube integration tests are opt-in (set RUN_YOUTUBE_ONLINE_TESTS=1)')
 class Online(unittest.TestCase, Pipeline):
     def test_fetch_matches_old_pipeline(self):
         tmp = tempfile.mkdtemp(dir=TMP)
