@@ -67,11 +67,6 @@ jobs:
           chmod +x build.sh tools/*.sh check.sh
           sh -x ./build.sh ../ytdec/build/target/ytdec
 
-      # Build the app from this repository: the local app.json includes the Phone remote entry.
-      - name: Build RideTube app package
-        run: |
-          python3 kit/tools/build.py jap_ridetube
-
       - name: Fetch required published MGU runtime artifacts
         run: |
           set -euo pipefail
@@ -92,7 +87,7 @@ jobs:
           root = pathlib.Path('dist/release')
           catalog = json.loads((root / 'catalog.json').read_text())
           components = {c['id']: c for c in catalog['components']}
-          required = {'jap_ridetube', 'jap-ridetube-d', 'jap-node22', 'mgu-render-id7-touch'}
+          required = {'jap-ridetube-d', 'jap-node22', 'mgu-render-id7-touch'}
           missing = required - components.keys()
           assert not missing, f'missing catalog components: {sorted(missing)}'
           for component in components.values():
@@ -102,18 +97,16 @@ jobs:
                   assert p.is_file(), f'missing artifact: {p}'
                   assert p.stat().st_size == artifact['size'], f'size mismatch: {p}'
                   assert component.get('version'), f'missing version: {component["id"]}'
-          app = components['jap_ridetube']
-          assert app['version'] == '0.6.5', app['version']
+          repo = json.loads(pathlib.Path('mgu-repo.json').read_text())
+          app = next(c for c in repo['components'] if c['id'] == 'jap_ridetube')
+          assert app['build']['python'] == 'kit/tools/build.py'
+          assert app['build']['sdk'] == 'oap-sdk'
+          assert app['build']['output'] == 'dist/{id}@{version}.tgz'
+          spec = json.loads(pathlib.Path('apps/jap_ridetube/app.json').read_text())
+          assert spec['version'] == '0.6.5'
+          assert any(item[1] == 'BTN_REMOTE' for item in spec['screens'][1]['items']), 'Phone remote entry missing from app source'
           assert app['requires']['jap-ridetube-d'] == components['jap-ridetube-d']['version']
-          with tarfile.open(root / app['artifact']['name'], 'r:gz') as t:
-              names = t.getnames()
-              assert names, 'empty RideTube app package'
-              spec = next((n for n in names if n.endswith('/app.json') or n == 'app.json'), None)
-              assert spec, 'app.json missing from RideTube package'
-              import io
-              packed_app = json.load(t.extractfile(spec))
-              assert any(item[1] == 'BTN_REMOTE' for item in packed_app['screens'][1]['items']), 'Phone remote entry missing from built app'
-          print('Catalog OK:', ', '.join(sorted(components)))
+          print('Catalog and MGU Store source OK:', ', '.join(sorted(components)), '+ jap_ridetube (built on the car)')
           PY
 
       - name: Publish MGU Store catalog release
@@ -123,4 +116,4 @@ jobs:
           gh release delete catalog --yes || true
           gh release create catalog dist/release/* \
             --title 'RideTube MGU Store catalog' \
-            --notes 'Complete MGU Store source catalog for BMW iDrive 7. Includes RideTube app, VLESS-enabled RideTube service, Node.js runtime and optional Full-width touch.'
+            --notes 'MGU Store tools for RideTube. The RideTube app is built on the head unit from the repository branch via mgu-repo.json, using the BMW SDK donor already on the car. Includes the VLESS-enabled service, Node.js runtime and optional Full-width touch.'
