@@ -1,5 +1,9 @@
 'use strict';
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const cp = require('child_process');
 const vless = require('../vless.js');
 
 const fm = encodeURIComponent(JSON.stringify({
@@ -20,4 +24,14 @@ assert.strictEqual(c.outbounds[0].streamSettings.finalmask.tcp[0].settings.packe
 assert.throws(() => vless.parseUri(uri.replace('xtls-rprx-vision', '')), /missing flow|unsupported VLESS flow/);
 assert.throws(() => vless.parseUri(uri.replace('vless://', 'https://')), /expected vless/);
 assert.throws(() => vless.parseUri(uri.replace('10-20', '0')), /invalid fm lengths/);
+// When build_xray.sh has supplied the official binary, validate the exact generated REALITY + FinalMask config.
+const xray = path.join(__dirname, '..', 'build', 'xray');
+if (fs.existsSync(xray)) {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ridetube-xray-'));
+    const cf = path.join(d, 'config.json');
+    fs.writeFileSync(cf, JSON.stringify(c));
+    const check = cp.spawnSync(xray, ['run', '-test', '-c', cf], { encoding: 'utf8', timeout: 15000 });
+    try { fs.unlinkSync(cf); fs.rmdirSync(d); } catch (e) { /* test temp */ }
+    assert.strictEqual(check.status, 0, String(check.stdout || '') + String(check.stderr || ''));
+}
 console.log('vless config tests: ok');

@@ -2117,7 +2117,7 @@ Daemon.prototype.listVless = function () {
 Daemon.prototype.importVless = function (uri) {
     // The phone page runs unprivileged; only this root-side hook parses and writes credentials.
     const parsed = require('./vless.js').parseUri(uri);
-    const key = crypto.createHash('sha256').update(parsed.id + '@' + parsed.address + ':' + parsed.port).digest('hex').slice(0, 16);
+    const key = crypto.createHash('sha256').update(JSON.stringify(parsed)).digest('hex').slice(0, 16);
     const file = path.join(this.opts.stateDir, 'vless-profiles.json');
     const profiles = this.vlessProfiles().filter((p) => p.key !== key);
     profiles.push(Object.assign({ key: key, name: parsed.address + ':' + parsed.port, addedAt: new Date().toISOString() }, parsed));
@@ -2134,7 +2134,11 @@ Daemon.prototype.importVless = function (uri) {
 Daemon.prototype.selectVless = function (key) {
     if (key !== 'off' && !this.vlessProfiles().some((p) => p.key === key)) throw new Error('VLESS profile not found');
     const next = key === 'off' ? null : key;
-    if (next === this.vlessKey) return { ok: true, active: next };
+    if (next === this.vlessKey) {
+        if (next && !this.xrayReady) this.startXray().catch((e) => this.log('VLESS: start failed (' + e.message + ')'));
+        return { ok: true, active: next };
+    }
+    this.stopXray();
     this.vlessKey = next;
     const file = path.join(this.opts.stateDir, 'vless-active.json');
     if (next) writeIfChanged(file, JSON.stringify({ key: next }) + '\n', 0o600);
