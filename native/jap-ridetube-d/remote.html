@@ -41,6 +41,15 @@ button:disabled{opacity:.5}
     <button id="send" type="submit" data-t="Send to the car">Send to the car</button>
     <p id="msg" role="status"></p>
   </form>
+  <section class="card" id="vlessCard">
+    <form id="vlessForm">
+      <label for="vless" data-t="Add a VLESS profile">Add a VLESS profile</label>
+      <textarea id="vless" maxlength="8192" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="vless://…"></textarea>
+      <button id="vlessSend" type="submit" data-t="Save VLESS profile on the car">Save VLESS profile on the car</button>
+      <p id="vlessMsg" role="status"></p>
+    </form>
+    <p class="hint" data-t="The profile is sent only to the car and stored locally. It is not uploaded to GitHub.">The profile is sent only to the car and stored locally. It is not uploaded to GitHub.</p>
+  </section>
   <p class="hint" data-t="A link plays on the car. Words search on the car. The car decides what it can show while driving.">A link plays on the car. Words search on the car. The car decides what it can show while driving.</p>
 </div>
 <p id="locked" hidden data-t="Scan the code on the car's screen again (RideTube, Phone remote). The phone must be on the car's Wi-Fi hotspot.">Scan the code on the car's screen again (RideTube, Phone remote). The phone must be on the car's Wi-Fi hotspot.</p>
@@ -109,6 +118,17 @@ $('form').onsubmit = function (ev) {
     $('text').value = '';
     setTimeout(status, 1500);
   }, function (e) { if (e.message) { say(T(e.message), true); } }).then(function () { $('send').disabled = false; });
+};
+$('vlessForm').onsubmit = function (ev) {
+  ev.preventDefault();
+  var uri = $('vless').value.trim();
+  if (!/^vless:\/\//i.test(uri)) { $('vlessMsg').textContent = T('Paste a vless:// profile link'); $('vlessMsg').className = 'bad'; return; }
+  $('vlessSend').disabled = true; $('vlessMsg').textContent = '';
+  api('POST', '/api/vless', { uri: uri }).then(function (j) {
+    $('vlessMsg').textContent = T('Saved on the car: ') + String(j.profile || 'VLESS profile');
+    $('vlessMsg').className = ''; $('vless').value = '';
+  }, function (e) { if (e.message) { $('vlessMsg').textContent = T(e.message); $('vlessMsg').className = 'bad'; } })
+    .then(function () { $('vlessSend').disabled = false; });
 };
 if (!token) { locked(); return; }
 status();

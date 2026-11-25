@@ -1420,7 +1420,7 @@ function Daemon(o) {
     this.webUid = null;    // the phone remote's server (remote.js), picked when it is first turned on
     this.rc = new (require('./remote.js').Remote)(this.opts, {
         log: this.log, emit: (o) => this.emit(o), hasApp: () => !!this.client, shared: () => this.sockShared(), idRe: ID_RE,
-        uid: () => this.remoteUid(),
+        uid: () => this.remoteUid(), importVless: (uri) => this.importVless(uri),
         status: () => ({ state: this.state, id: this.cur ? this.cur.id : null, title: this.cur ? this.cur.title : null, elapsed: this.elapsed, total: this.total })
     });
     this.account = new Account(this.opts, (o) => this.emit(o), () => tvClient(this.hl, this.gl));
@@ -2090,6 +2090,25 @@ Daemon.prototype.related = async function (id) {
     return this.emit({ ev: 'related', id: id, items: items });
 };
 // `remote` {on} -> remote{on, url, expires} (remote.js; on not a bool: only the state). WP9, 0.4.1
+Daemon.prototype.importVless = function (uri) {
+    // The phone page runs unprivileged; only this root-side hook parses and writes credentials.
+    const parsed = require('./vless.js').parseUri(uri);
+    const file = path.join(this.opts.stateDir, 'vless-profiles.json');
+    let profiles = [];
+    const old = readJson(file);
+    if (Array.isArray(old)) profiles = old.filter((p) => p && typeof p === 'object' && typeof p.id === 'string');
+    const name = parsed.address + ':' + parsed.port;
+    const next = profiles.filter((p) => p.name !== name);
+    next.push(Object.assign({ name: name, addedAt: new Date().toISOString() }, parsed));
+    if (next.length > 10) throw new Error('At most 10 VLESS profiles can be stored');
+    mkdirp(this.opts.stateDir);
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(next) + '\\n', { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, file);
+    fs.chmodSync(file, 0o600);
+    return { name: name, server: parsed.address, port: parsed.port };
+};
 Daemon.prototype.remote = function (on, lang) { return this.rc.set(on, lang); };
 // the web uid (remote.js's server): its own, never the fetch uid nor an app's; throws when there is none
 Daemon.prototype.remoteUid = function () {

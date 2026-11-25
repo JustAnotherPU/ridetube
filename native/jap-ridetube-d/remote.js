@@ -54,7 +54,7 @@ const TAG = 'jap-ridetube-d-remote';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;   // ytd.js's ID_RE (root checks again with that one)
 const TOKEN_RE = /^Bearer ([0-9a-f]{32})$/;
 const IFACE_RE = /^[A-Za-z0-9_.-]{1,15}$/;
-const Q_MAX = 200, TEXT_MAX = 2048, BODY_MAX = 16 * 1024, LINE_MAX = 4096, FAIL_MAX = 10;
+const Q_MAX = 200, TEXT_MAX = 2048, BODY_MAX = 16 * 1024, LINE_MAX = 12288, FAIL_MAX = 10;
 const ASK_MS = 5000;
 const LANGS = ['en', 'fr', 'nl', 'de', 'es', 'it', 'pt', 'ru', 'zh-CN'];   // RideTube's languages (the app's catalogs)
 // the hosts a pasted link may name, and the paths that carry a video id
@@ -217,7 +217,7 @@ Remote.prototype.start = function () {
     try { uid = this.h.uid(); } catch (e) { return fail(e.message); }
     if (!(uid > 0)) return fail('no web uid');
     const r = { token: crypto.randomBytes(16).toString('hex'), uid, port, iface, addr: null, listening: [], child: null,
-        server: null, client: null, timers: [], expiry: null, until: 0, acted: 0 };
+        server: null, client: null, timers: [], expiry: null, until: 0, acted: 0, imported: 0, importedAt: 0 };
     this.run = r;
     try { this.listenSock(r); } catch (e) { this.stop(); return fail('remote.sock: ' + e.message); }
     r.addr = this.addr(iface);
@@ -306,6 +306,24 @@ Remote.prototype.onLine = function (r, c, line) {
     case 'status': {
         const s = this.h.status();
         return reply({ status: { state: s.state, id: s.id || null, title: s.title || null, elapsed: s.elapsed || 0, total: s.total || 0 } });
+    }
+    case 'import_vless': {
+        if (typeof m.uri !== 'string' || m.uri.length > 8192 || m.uri.slice(0, 8) !== 'vless://') return reply({ error: 'Paste a valid vless:// profile' });
+        if (r.imported >= 5) return reply({ error: 'Import limit reached: turn the phone page off and on' });
+        const now = Date.now();
+        if (now - r.importedAt < this.o.remoteActMs) return reply({ error: 'Too fast: wait a moment' });
+        r.importedAt = now;
+        try {
+            if (typeof this.h.importVless !== 'function') throw new Error('VLESS import is not available in this service version');
+            const saved = this.h.importVless(m.uri);
+            r.imported += 1;
+            this.touch(r);
+            this.h.log('remote: VLESS profile imported (' + clip(saved.name || saved.server) + ')');
+            return reply({ ok: true, profile: saved.name || saved.server });
+        } catch (e) {
+            this.h.log('remote: VLESS import rejected (' + clip(e.message) + ')');
+            return reply({ error: String(e.message || 'Invalid VLESS profile').slice(0, 160) });
+        }
     }
     default:
         this.h.log('remote: refused ' + (/^\w{1,20}$/.test(String(m.cmd)) ? m.cmd : '?'));
@@ -463,7 +481,7 @@ function serve() {
             reply(res, 200, 'text/html; charset=utf-8', page, { 'Content-Security-Policy': csp });
             return;
         }
-        if (p !== '/api/status' && p !== '/api/send') { json(res, 404, { error: 'Not found' }); return; }
+        if (p !== '/api/status' && p !== '/api/send' && p !== '/api/vless') { json(res, 404, { error: 'Not found' }); return; }
         // the token first: the right one always passes (a flood of wrong ones never locks the passenger out)
         if (!authorised(req)) {
             const ip = String(req.socket.remoteAddress);
@@ -488,6 +506,16 @@ function serve() {
                 if (id === undefined && !q) { json(res, 400, { error: 'Type a search (at most 200 characters)' }); return; }   // (Q_MAX)
                 const req2 = id ? { cmd: 'play', id } : { cmd: 'search', q };
                 ask(req2).then((m) => (m.ok ? json(res, 200, { ok: true, did: req2.cmd }) : json(res, 422, { error: String(m.error || 'Not allowed') })), fail);
+            });
+        } else if (p === '/api/vless' && req.method === 'POST') {
+            if (!/^application\\/json\\b/.test(req.headers['content-type'] || '')) { json(res, 415, { error: 'Only JSON is accepted' }); return; }
+            readBody(req, (err, text) => {
+                if (err) { json(res, 413, { error: 'Too long' }); return; }
+                let b = null;
+                try { b = JSON.parse(text); } catch (e) { /* below */ }
+                const uri = b && typeof b === 'object' && typeof b.uri === 'string' && b.uri.length <= 8192 ? b.uri.trim() : '';
+                if (uri.slice(0, 8) !== 'vless://') { json(res, 400, { error: 'Paste a vless:// profile link' }); return; }
+                ask({ cmd: 'import_vless', uri: uri }).then((m) => (m.ok ? json(res, 200, { ok: true, profile: m.profile }) : json(res, 422, { error: String(m.error || 'Profile was rejected') })), fail);
             });
         } else json(res, 405, { error: 'Not allowed' });
     };

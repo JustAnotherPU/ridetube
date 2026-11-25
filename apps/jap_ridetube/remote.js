@@ -70,7 +70,7 @@ module.exports = function remotePage(o) {
                 const step = (s, size, color, bold) => { cv.text(o.fit(cv, s, size, W - x - 40, bold ? LITB : LIT), x, y, size, color, bold ? LITB : LIT); y += size + 20; };
                 step(t('1. Connect the phone to the car\'s Wi-Fi hotspot'), 32, C.text);
                 step(t('2. Scan this code with its camera'), 32, C.text);
-                step(t('3. Paste a YouTube link or type a search, then send'), 32, C.text);
+                step(t('3. Paste a YouTube link, search, or VLESS profile on your phone'), 32, C.text);
                 if (!n) step(m[1] + ':' + m[2], 24, C.amber, true);
                 step(o.message('Address {address} · turns off by itself in {minutes} min', { address: m[1] + ':' + m[2], minutes: left }), 22, C.dim);
                 step(t('Anyone with this code can send videos while it is on'), 22, C.dim);
