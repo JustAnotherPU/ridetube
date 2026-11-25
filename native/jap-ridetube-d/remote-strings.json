@@ -41,7 +41,7 @@
     "Paste a valid vless:// profile": "Collez un profil vless:// valide",
     "Import limit reached: turn the phone page off and on": "Limite d’importation atteint : désactivez puis réactivez la page du téléphone",
     "VLESS import is not available in this service version": "L’importation VLESS n’est pas disponible dans cette version du service",
-    "VLESS": "VLESS",
+    "VLESS": "VLESS (proxy)",
     "VLESS profile": "Profil VLESS"
   },
   "nl": {
@@ -86,7 +86,7 @@
     "Paste a valid vless:// profile": "Plak een geldig vless://-profiel",
     "Import limit reached: turn the phone page off and on": "Importlimiet bereikt: schakel de telefoonpagina uit en weer in",
     "VLESS import is not available in this service version": "VLESS-import is niet beschikbaar in deze serviceversie",
-    "VLESS": "VLESS",
+    "VLESS": "VLESS (proxy)",
     "VLESS profile": "VLESS-profiel"
   },
   "de": {
@@ -131,7 +131,7 @@
     "Paste a valid vless:// profile": "Gültiges vless://-Profil einfügen",
     "Import limit reached: turn the phone page off and on": "Importlimit erreicht: Telefonseite aus- und wieder einschalten",
     "VLESS import is not available in this service version": "VLESS-Import ist in dieser Dienstversion nicht verfügbar",
-    "VLESS": "VLESS",
+    "VLESS": "VLESS (Proxy)",
     "VLESS profile": "VLESS-Profil"
   },
   "es": {
@@ -176,7 +176,7 @@
     "Paste a valid vless:// profile": "Pega un perfil vless:// válido",
     "Import limit reached: turn the phone page off and on": "Se alcanzó el límite de importación: apaga y vuelve a encender la página del móvil",
     "VLESS import is not available in this service version": "La importación VLESS no está disponible en esta versión del servicio",
-    "VLESS": "VLESS",
+    "VLESS": "VLESS (proxy)",
     "VLESS profile": "Perfil VLESS"
   },
   "it": {
@@ -221,7 +221,7 @@
     "Paste a valid vless:// profile": "Incolla un profilo vless:// valido",
     "Import limit reached: turn the phone page off and on": "Limite di importazione raggiunto: disattiva e riattiva la pagina del telefono",
     "VLESS import is not available in this service version": "L’importazione VLESS non è disponibile in questa versione del servizio",
-    "VLESS": "VLESS",
+    "VLESS": "VLESS (proxy)",
     "VLESS profile": "Profilo VLESS"
   },
   "pt": {
@@ -266,7 +266,7 @@
     "Paste a valid vless:// profile": "Cole um perfil vless:// válido",
     "Import limit reached: turn the phone page off and on": "Limite de importação atingido: desligue e ligue novamente a página do telefone",
     "VLESS import is not available in this service version": "A importação VLESS não está disponível nesta versão do serviço",
-    "VLESS": "VLESS",
+    "VLESS": "VLESS (proxy)",
     "VLESS profile": "Perfil VLESS"
   },
   "ru": {
@@ -311,7 +311,7 @@
     "Paste a valid vless:// profile": "Вставьте корректный профиль vless://",
     "Import limit reached: turn the phone page off and on": "Достигнут лимит импорта: выключите и снова включите страницу телефона",
     "VLESS import is not available in this service version": "Импорт VLESS недоступен в этой версии сервиса",
-    "VLESS": "VLESS",
+    "VLESS": "VLESS (прокси)",
     "VLESS profile": "Профиль VLESS"
   },
   "zh-CN": {
@@ -356,7 +356,7 @@
     "Paste a valid vless:// profile": "粘贴有效的 vless:// 配置",
     "Import limit reached: turn the phone page off and on": "导入次数已达上限：请关闭并重新开启手机页面",
     "VLESS import is not available in this service version": "此服务版本不支持导入 VLESS",
-    "VLESS": "VLESS",
+    "VLESS": "VLESS（代理）",
     "VLESS profile": "VLESS 配置"
   }
 }
