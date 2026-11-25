@@ -1,12 +1,16 @@
-name: Build RideTube MGU test release
+name: Build RideTube MGU Store catalog
 
 on:
   push:
     branches:
       - feature/vless-xray-ridetube
     paths:
+      - 'apps/**'
+      - 'kit/**'
       - 'native/jap-ridetube-d/**'
       - 'native/ytdec/**'
+      - 'native/mgu-render-id7-touch/**'
+      - 'tools/release.py'
       - '.github/workflows/build-mgu-test.yml'
   workflow_dispatch:
 
@@ -14,13 +18,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: ridetube-mgu-test-${{ github.ref }}
+  group: ridetube-mgu-catalog-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout RideTube
         uses: actions/checkout@v5
@@ -54,7 +58,7 @@ jobs:
           make test
           make target PYTHON=python3.12
 
-      - name: Build MGU Store tool-kit artifact
+      - name: Build RideTube service tool
         working-directory: native/jap-ridetube-d
         env:
           MGU_STORE: ${{ github.workspace }}/mgu-store
@@ -63,22 +67,52 @@ jobs:
           chmod +x build.sh tools/*.sh check.sh
           sh -x ./build.sh ../ytdec/build/target/ytdec
 
-      - name: Upload test package
-        uses: actions/upload-artifact@v4
-        with:
-          name: jap-ridetube-d-0.6.0-mgu-test
-          path: native/jap-ridetube-d/dist/jap-ridetube-d@0.6.0.tgz
-          if-no-files-found: error
-          retention-days: 30
+      # The app OAP and Node.js runtime are upstream's byte-for-byte published artifacts.
+      # This repo changes the service, not BMW's extracted SDK or the app's OAP bundle.
+      - name: Fetch required published MGU app/runtime artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist native/mgu-render-id7-touch/dist
+          curl -fL --retry 3 'https://github.com/JustAnotherPU/ridetube/releases/download/catalog/jap_ridetube%400.6.4.tgz' -o 'dist/jap_ridetube@0.6.4.tgz'
+          curl -fL --retry 3 'https://github.com/JustAnotherPU/ridetube/releases/download/catalog/mgu-render-id7-touch%401.4.0.tgz' -o 'native/mgu-render-id7-touch/dist/mgu-render-id7-touch@1.4.0.tgz'
+          curl -fL --retry 3 'https://github.com/JustAnotherPU/mgu-apps/releases/download/catalog/jap-node22%4022.23.4.tgz' -o 'dist/jap-node22@22.23.4.tgz'
 
-      - name: Publish test release
-        if: startsWith(github.ref, 'refs/heads/feature/vless-xray-ridetube')
+      - name: Assemble complete MGU Store catalog
+        run: |
+          python3 tools/release.py \
+            --node22 dist/jap-node22@22.23.4.tgz \
+            --base 'https://github.com/andrug05/tubevpn/releases/download/catalog/'
+
+      - name: Validate catalog and artifacts
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, tarfile
+          root = pathlib.Path('dist/release')
+          catalog = json.loads((root / 'catalog.json').read_text())
+          components = {c['id']: c for c in catalog['components']}
+          required = {'jap_ridetube', 'jap-ridetube-d', 'jap-node22', 'mgu-render-id7-touch'}
+          missing = required - components.keys()
+          assert not missing, f'missing catalog components: {sorted(missing)}'
+          for component in components.values():
+              artifact = component.get('artifact')
+              if artifact:
+                  p = root / artifact['name']
+                  assert p.is_file(), f'missing artifact: {p}'
+                  assert p.stat().st_size == artifact['size'], f'size mismatch: {p}'
+                  assert component.get('version'), f'missing version: {component["id"]}'
+          app = components['jap_ridetube']
+          assert app['version'] == '0.6.4', app['version']
+          assert app['requires']['jap-ridetube-d'] == components['jap-ridetube-d']['version']
+          with tarfile.open(root / app['artifact']['name'], 'r:gz') as t:
+              assert t.getnames(), 'empty RideTube app package'
+          print('Catalog OK:', ', '.join(sorted(components)))
+          PY
+
+      - name: Publish MGU Store catalog release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete v0.6.0-mgu-test --yes || true
-          gh release create v0.6.0-mgu-test \
-            native/jap-ridetube-d/dist/jap-ridetube-d@0.6.0.tgz \
-            --title "RideTube 0.6.0 — MGU VLESS test" \
-            --notes "Test build for BMW MGU ID7. Includes phone VLESS profile import and Xray-core integration. Not yet validated on a real head unit." \
-            --prerelease
+          gh release delete catalog --yes || true
+          gh release create catalog dist/release/* \
+            --title 'RideTube MGU Store catalog' \
+            --notes 'Complete MGU Store source catalog for BMW iDrive 7. Includes RideTube app, VLESS-enabled RideTube service, Node.js runtime and optional Full-width touch.'
