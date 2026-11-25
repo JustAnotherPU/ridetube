@@ -72,7 +72,7 @@ function defaults() {
         fetcher: ['/var/opt/mgu-python/current/bin/python3', '-I', path.join(here, 'ytfetch.py')],
         thumbCmd: ['/var/opt/jap-node22/current/bin/node', path.join(here, 'thumb.js')],
         xrayBin: env.MGU_YT_XRAY || path.join(here, 'xray'),
-        xrayDir: env.MGU_YT_XRAY_DIR || '/run/jap-ridetube-d/xray',
+        xrayConfig: env.MGU_YT_XRAY_CONFIG || '/run/jap-ridetube-d/xray.json',
         xrayPort: 10808,
         startVideoMs: 6000,  // video fetched ahead before playback starts (later the buffering pause covers a slow link)
         fetchRetryMs: [3000, 8000], // a fetch failing before playback (the network): tried again after these waits
@@ -2178,17 +2178,21 @@ Daemon.prototype.startXray = function () {
                 if (!current()) return finish(new Error('VLESS selection changed'));
                 const profile = this.vlessProfiles().filter((p) => p.key === this.vlessKey)[0];
                 if (!profile) throw new Error('selected profile is missing');
-                const uid = this.uid(), dir = this.opts.xrayDir;
-                if (!fs.existsSync(dir)) mkdirp(dir);
-                fs.chmodSync(dir, 0o700);
-                fs.chownSync(dir, uid, uid);
+                const uid = this.uid(), cf = this.opts.xrayConfig;
+                // Keep the directory and config root-owned; the fetch UID gets read-only group access only.
+                const dir = path.dirname(cf);
+                if (!fs.existsSync(dir)) throw new Error('Xray runtime directory is missing');
                 const config = require('./vless.js').makeConfig(profile, this.opts.xrayPort);
                 const lease = readJson(this.opts.leaseFile) || {};
                 if (Array.isArray(lease.dns) && lease.dns.length) config.dns = { servers: lease.dns.filter((x) => typeof x === 'string') };
-                const cf = path.join(dir, 'config.json');
-                fs.writeFileSync(cf, JSON.stringify(config) + '\n', { mode: 0o600 });
-                fs.chmodSync(cf, 0o600);
-                fs.chownSync(cf, uid, uid);
+                const tmp = cf + '.tmp';
+                try { fs.unlinkSync(tmp); } catch (e) { /* none */ }
+                fs.writeFileSync(tmp, JSON.stringify(config) + '\n', { mode: 0o600 });
+                fs.chownSync(tmp, 0, uid);
+                fs.chmodSync(tmp, 0o440);
+                fs.renameSync(tmp, cf);
+                fs.chownSync(cf, 0, uid);
+                fs.chmodSync(cf, 0o440);
                 child = cp.spawn(this.opts.xrayBin, ['run', '-c', cf], {
                     uid: uid, gid: uid, cwd: '/', env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
                     stdio: ['ignore', 'ignore', 'ignore']
@@ -2233,7 +2237,8 @@ Daemon.prototype.stopXray = function () {
             try { child.kill('SIGTERM'); } catch (e) { finish(); }
         });
     }
-    try { fs.unlinkSync(path.join(this.opts.xrayDir, 'config.json')); } catch (e) { /* none */ }
+    try { fs.unlinkSync(this.opts.xrayConfig); } catch (e) { /* none */ }
+    try { fs.unlinkSync(this.opts.xrayConfig + '.tmp'); } catch (e) { /* none */ }
     return stopped;
 };
 Daemon.prototype.remote = function (on, lang) { return this.rc.set(on, lang); };
