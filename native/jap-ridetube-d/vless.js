@@ -15,8 +15,8 @@ function parseRangeList(value, key) {
         v = String(v);
         if (!/^\d+(?:-\d+)?$/.test(v)) throw new Error('invalid ' + key);
         const p = v.split('-').map(Number);
-        if (p.length === 2 && (p[0] < 1 || p[1] < p[0])) throw new Error('invalid ' + key);
-        if (p[0] < 0 || p[p.length - 1] > 16384) throw new Error('invalid ' + key);
+        if (p[0] < 1 || (p.length === 2 && p[1] < p[0])) throw new Error('invalid ' + key);
+        if (p[p.length - 1] > 16384) throw new Error('invalid ' + key);
         return v;
     });
 }
