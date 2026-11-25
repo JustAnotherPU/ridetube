@@ -3,4 +3,5 @@
 set -eu
 d=$(cd "$(dirname "$0")" && pwd)
 /var/opt/mgu-python/current/bin/python3 -I -c "import sys;sys.path.insert(0,'$d/ytdlp.pyz');import yt_dlp,yt_dlp_ejs"
+"$d/xray" version >/dev/null
 exec /var/opt/jap-node22/current/bin/node -e "require('$d/vendor/jpeg-js/decoder.js');require('$d/thumb.js')"

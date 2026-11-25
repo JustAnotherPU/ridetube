@@ -126,3 +126,11 @@ RideTube itself is GPL-3.0-or-later (LICENSE). The parts below come from others.
 
 RideTube is not affiliated with, endorsed by or sponsored by Google LLC or YouTube. YouTube is a trademark of
 Google LLC; the name is used only to say what service the app is a client for.
+
+
+6. Xray-core (the optional VLESS client shipped as `xray` in the jap-ridetube-d tool kit):
+   XTLS/Xray-core v26.11.9, Mozilla Public License 2.0. The unmodified official Linux amd64 release
+   binary is downloaded at build time from
+   https://github.com/XTLS/Xray-core/releases/tag/v26.11.9 and verified against the release asset's
+   published SHA-256. Corresponding source code and the full MPL-2.0 license are available from that
+   tag (LICENSE at the repository root). Xray-core is not modified by RideTube.

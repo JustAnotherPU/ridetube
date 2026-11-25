@@ -13,6 +13,9 @@ SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$here" log -1 --format=%ct 2>/d
 export SOURCE_DATE_EPOCH   # ytdlp.pyz entries and the tool kit share one timestamp
 sh "$here/tools/build_pyz.sh" "$py"
 sh "$here/tools/build_xray.sh" "$py"
+node --check "$here/ytd.js"
+node --check "$here/remote.js"
+node --check "$here/vless.js"
 [ -f "$here/vendor/jpeg-js/decoder.js" ] || sh "$here/tools/vendor_jpeg.sh"
 node "$here/test/test_ytd.js" >/dev/null
 node "$here/test/test_thumb.js" >/dev/null

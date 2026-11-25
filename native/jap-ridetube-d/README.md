@@ -490,7 +490,7 @@ JSON block of the page that its script reads. The trust boundaries:
     python3 -I test/live_stream.py $PWD/ytfetch.py $PWD/build/ytdlp.pyz   # WP8, online: streamed and restreamed == a whole fetch
     MGU_STORE=... ./build.sh [path/to/ytdec]   # → dist/jap-ridetube-d@<version>.tgz (default ../ytdec/build/target/ytdec)
 
-`build.sh`: checks ytdec is an x86-64 ELF, runs `tools/build_pyz.sh` (→ `build/ytdlp.pyz`),
+`build.sh`: checks ytdec is an x86-64 ELF, runs `tools/build_pyz.sh` (→ `build/ytdlp.pyz`) and `tools/build_xray.sh` (→ `build/xray`),
 `tools/vendor_jpeg.sh` when `vendor/jpeg-js/` is missing, the three tests, copies ytdec into `build/`,
 then packs with the MGU Store's `deploy/hu artifact` (`MGU_STORE`; `SOURCE_DATE_EPOCH`: the last commit).
 `tools/vendor_jpeg.sh` fetches the pinned jpeg-js tarball (BSD-3-Clause) from the npm registry,
