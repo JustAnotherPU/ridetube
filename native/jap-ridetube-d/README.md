@@ -501,3 +501,17 @@ mgu-render 0.6.11 (the video layer).
 
 Overrides (tests): `MGU_YT_SOMEIP`, `MGU_YT_SRCGEN`, `MGU_YT_YTDEC`, `MGU_YT_CACHE`,
 `MGU_YT_LOGDIR`, `MGU_YT_SOCK`, `MGU_YT_STATE`, `MGU_YT_ACCOUNT`, `MGU_YT_REPORT_URL`, or the `Daemon` constructor options.
+
+
+## VLESS (optional, 0.6.0)
+
+The phone remote accepts VLESS share links. Profiles are parsed by the root daemon and stored in
+`state/vless-profiles.json` (0600); the active key is stored separately. The phone page can select
+a saved profile or switch VLESS off. The bundled Xray-core client listens only on
+`127.0.0.1:10808` and runs as RideTube's fetch UID. RideTube's own fetcher and thumbnail helper
+use that local SOCKS5 while a VLESS profile is selected. Other MGU applications and the MGU Store
+uplink configuration are not changed. The Xray binary is fetched from the official XTLS/Xray-core
+release during build and checked against its published SHA-256.
+
+Build additionally runs `tools/build_xray.sh` (pinned Xray-core v26.11.9). VLESS can be disabled
+from the phone remote; when disabled RideTube returns to its existing MGU Store proxy setting.

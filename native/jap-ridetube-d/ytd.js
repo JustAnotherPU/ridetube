@@ -26,10 +26,10 @@ const MEDIA_FILES = ['audio.m4a', 'index.bin', 'video.h264'];
 const VIDEO_DIR_MODE = 0o711;
 // thumb.rgba length -> [w, h]: 160x90 in caches from older proxies, 320x180 since 0.1.6
 const THUMB_SIZES = { 57600: [160, 90], 230400: [320, 180] };
-const VERSION = '0.5.4';   // component.json's (test_ytd.js checks): sent with a log report
+const VERSION = '0.6.0';   // component.json's (test_ytd.js checks): sent with a log report
 // the day this build was released (UTC), bumped with VERSION at each release (tools/release.py refuses one in the
 // future). A head unit clock before it is provably wrong: only then does TLS skip the certificate dates (certTime)
-const BUILT = '2026-11-21';
+const BUILT = '2026-11-25';
 // what `hello` says this build answers for real. The frozen names: health, related, hist (feed hist|liked), ytdlp,
 // remote, proxy, stream, download (library, download, remove, auto_download). A package adds its name here (through the integrator) once its command works
 const CAPS = ['related', 'hist', 'health', 'remote', 'ytdlp', 'download', 'proxy'];
@@ -2149,50 +2149,73 @@ Daemon.prototype.startXray = function () {
     if (!this.vlessKey) return Promise.resolve(false);
     if (this.xrayReady && this.xrayChild && !this.xrayChild.killed) return Promise.resolve(true);
     if (this.xrayStarting) return this.xrayStarting;
-    this.xrayStarting = new Promise((resolve, reject) => {
-        const profile = this.vlessProfiles().filter((p) => p.key === this.vlessKey)[0];
-        if (!profile) { this.xrayStarting = null; return reject(new Error('selected profile is missing')); }
-        const uid = this.uid(), dir = this.opts.xrayDir;
-        try {
-            if (!fs.existsSync(dir)) mkdirp(dir);
-            fs.chmodSync(dir, 0o700);
-            fs.chownSync(dir, uid, uid);
-            const config = require('./vless.js').makeConfig(profile, this.opts.xrayPort);
-            const lease = readJson(this.opts.leaseFile) || {};
-            if (Array.isArray(lease.dns) && lease.dns.length) config.dns = { servers: lease.dns.filter((x) => typeof x === 'string') };
-            const cf = path.join(dir, 'config.json');
-            fs.writeFileSync(cf, JSON.stringify(config) + '\n', { mode: 0o600 });
-            fs.chmodSync(cf, 0o600);
-            fs.chownSync(cf, uid, uid);
-            const child = cp.spawn(this.opts.xrayBin, ['run', '-c', cf], {
-                uid: uid, gid: uid, cwd: '/', env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
-                stdio: ['ignore', 'ignore', 'ignore']
-            });
-            this.xrayChild = child;
-            let done = false, tries = 0;
+    const generation = (this.xrayGeneration || 0) + 1;
+    this.xrayGeneration = generation;
+    const promise = new Promise((resolve, reject) => {
+        process.nextTick(() => {
+            const current = () => generation === this.xrayGeneration && !!this.vlessKey;
+            let child = null, timer = null, deadline = null, done = false, tries = 0;
             const finish = (err) => {
-                if (done) return; done = true; clearInterval(timer); clearTimeout(deadline);
-                this.xrayStarting = null;
-                if (err) { this.xrayReady = false; try { child.kill('SIGKILL'); } catch (e) { /* gone */ } reject(err); }
-                else { this.xrayReady = true; this.log('VLESS: local SOCKS5 ready'); resolve(true); }
+                if (done) return;
+                done = true;
+                clearInterval(timer); clearTimeout(deadline);
+                if (generation === this.xrayGeneration) this.xrayStarting = null;
+                if (!current()) { if (child) try { child.kill('SIGKILL'); } catch (e) { /* gone */ } reject(new Error('VLESS selection changed')); return; }
+                if (err) {
+                    this.xrayReady = false;
+                    if (child) try { child.kill('SIGKILL'); } catch (e) { /* gone */ }
+                    reject(err);
+                } else {
+                    this.xrayReady = true;
+                    this.log('VLESS: local SOCKS5 ready');
+                    resolve(true);
+                }
             };
-            child.once('error', (e) => finish(new Error('Xray could not start: ' + e.message)));
-            child.once('exit', (code, sig) => {
-                if (this.xrayChild === child) { this.xrayChild = null; this.xrayReady = false; this.dropSpare(); }
-                if (!done) finish(new Error('Xray exited before SOCKS5 was ready (' + (sig || code) + ')'));
-            });
-            const timer = setInterval(() => {
-                tries++;
-                const sock = net.connect({ host: '127.0.0.1', port: this.opts.xrayPort });
-                sock.once('connect', () => { sock.destroy(); finish(null); });
-                sock.once('error', () => { sock.destroy(); if (tries >= 100) finish(new Error('Xray SOCKS5 did not become ready')); });
-            }, 100);
-            const deadline = setTimeout(() => finish(new Error('Xray startup timed out')), 11000);
-        } catch (e) { this.xrayStarting = null; reject(e); }
+            try {
+                const profile = this.vlessProfiles().filter((p) => p.key === this.vlessKey)[0];
+                if (!profile) throw new Error('selected profile is missing');
+                const uid = this.uid(), dir = this.opts.xrayDir;
+                if (!fs.existsSync(dir)) mkdirp(dir);
+                fs.chmodSync(dir, 0o700);
+                fs.chownSync(dir, uid, uid);
+                const config = require('./vless.js').makeConfig(profile, this.opts.xrayPort);
+                const lease = readJson(this.opts.leaseFile) || {};
+                if (Array.isArray(lease.dns) && lease.dns.length) config.dns = { servers: lease.dns.filter((x) => typeof x === 'string') };
+                const cf = path.join(dir, 'config.json');
+                fs.writeFileSync(cf, JSON.stringify(config) + '\n', { mode: 0o600 });
+                fs.chmodSync(cf, 0o600);
+                fs.chownSync(cf, uid, uid);
+                child = cp.spawn(this.opts.xrayBin, ['run', '-c', cf], {
+                    uid: uid, gid: uid, cwd: '/', env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
+                    stdio: ['ignore', 'ignore', 'ignore']
+                });
+                this.xrayChild = child;
+                child.once('error', (e) => finish(new Error('Xray could not start: ' + e.message)));
+                child.once('exit', (code, sig) => {
+                    if (this.xrayChild === child && generation === this.xrayGeneration) {
+                        this.xrayChild = null; this.xrayReady = false; this.dropSpare();
+                        if (!this.closed && this.vlessKey) setTimeout(() => {
+                            if (!this.closed && this.vlessKey && !this.xrayChild) this.startXray().catch((e) => this.log('VLESS: restart failed (' + e.message + ')'));
+                        }, 2000);
+                    }
+                    if (!done) finish(new Error('Xray exited before SOCKS5 was ready (' + (sig || code) + ')'));
+                });
+                timer = setInterval(() => {
+                    if (!current()) return finish(new Error('VLESS selection changed'));
+                    tries++;
+                    const sock = net.connect({ host: '127.0.0.1', port: this.opts.xrayPort });
+                    sock.once('connect', () => { sock.destroy(); finish(null); });
+                    sock.once('error', () => { sock.destroy(); if (tries >= 100) finish(new Error('Xray SOCKS5 did not become ready')); });
+                }, 100);
+                deadline = setTimeout(() => finish(new Error('Xray startup timed out')), 11000);
+            } catch (e) { finish(e); }
+        });
     });
-    return this.xrayStarting;
+    this.xrayStarting = promise;
+    return promise;
 };
 Daemon.prototype.stopXray = function () {
+    this.xrayGeneration = (this.xrayGeneration || 0) + 1;
     this.xrayReady = false;
     this.xrayStarting = null;
     const child = this.xrayChild; this.xrayChild = null;

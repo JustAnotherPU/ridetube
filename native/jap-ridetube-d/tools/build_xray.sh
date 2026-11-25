@@ -34,4 +34,4 @@ with zipfile.ZipFile(src) as z:
 os.chmod(out, 0o755)
 PY
 mv "$here/build/xray.tmp" "$here/build/xray"
-"$here/build/xray" version | grep -q "$VERSION" || { echo "build_xray.sh: wrong Xray version" >&2; exit 1; }
+"$here/build/xray" version | grep -q "${VERSION#v}" || { echo "build_xray.sh: wrong Xray version" >&2; exit 1; }

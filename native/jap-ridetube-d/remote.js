@@ -516,7 +516,7 @@ function serve() {
         } else if (p === '/api/vless/list' && req.method === 'GET') {
             ask({ cmd: 'list_vless' }).then((m) => json(res, 200, { profiles: Array.isArray(m.profiles) ? m.profiles : [] }), fail);
         } else if (p === '/api/vless/select' && req.method === 'POST') {
-            if (!/^application\\/json\\b/.test(req.headers['content-type'] || '')) { json(res, 415, { error: 'Only JSON is accepted' }); return; }
+            if (!/^application\/json\b/.test(req.headers['content-type'] || '')) { json(res, 415, { error: 'Only JSON is accepted' }); return; }
             readBody(req, (err, text) => {
                 if (err) { json(res, 413, { error: 'Too long' }); return; }
                 let b = null; try { b = JSON.parse(text); } catch (e) { /* below */ }
