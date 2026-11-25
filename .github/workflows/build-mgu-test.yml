@@ -11,6 +11,7 @@ on:
       - 'native/ytdec/**'
       - 'native/mgu-render-id7-touch/**'
       - 'tools/release.py'
+      - 'mgu-repo.json'
       - '.github/workflows/build-mgu-test.yml'
   workflow_dispatch:
 
