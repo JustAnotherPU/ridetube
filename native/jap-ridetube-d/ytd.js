@@ -2138,14 +2138,13 @@ Daemon.prototype.selectVless = function (key) {
         if (next && !this.xrayReady) this.startXray().catch((e) => this.log('VLESS: start failed (' + e.message + ')'));
         return { ok: true, active: next };
     }
-    this.stopXray();
+    const stopped = this.stopXray();
     this.vlessKey = next;
     const file = path.join(this.opts.stateDir, 'vless-active.json');
     if (next) writeIfChanged(file, JSON.stringify({ key: next }) + '\n', 0o600);
     else try { fs.unlinkSync(file); } catch (e) { /* none */ }
     this.dropSpare();
-    if (next) this.startXray().catch((e) => this.log('VLESS: start failed (' + e.message + ')'));
-    else this.stopXray();
+    if (next) Promise.resolve(stopped).then(() => this.startXray()).catch((e) => this.log('VLESS: start failed (' + e.message + ')'));
     this.log('VLESS: ' + (next ? 'profile selected' : 'disabled'));
     return { ok: true, active: next };
 };
@@ -2176,6 +2175,7 @@ Daemon.prototype.startXray = function () {
                 }
             };
             try {
+                if (!current()) return finish(new Error('VLESS selection changed'));
                 const profile = this.vlessProfiles().filter((p) => p.key === this.vlessKey)[0];
                 if (!profile) throw new Error('selected profile is missing');
                 const uid = this.uid(), dir = this.opts.xrayDir;
@@ -2223,8 +2223,18 @@ Daemon.prototype.stopXray = function () {
     this.xrayReady = false;
     this.xrayStarting = null;
     const child = this.xrayChild; this.xrayChild = null;
-    if (child) { try { child.kill('SIGTERM'); } catch (e) { /* gone */ } }
+    let stopped = Promise.resolve();
+    if (child) {
+        stopped = new Promise((resolve) => {
+            let done = false;
+            const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
+            const timer = setTimeout(finish, 1500);
+            child.once('exit', finish);
+            try { child.kill('SIGTERM'); } catch (e) { finish(); }
+        });
+    }
     try { fs.unlinkSync(path.join(this.opts.xrayDir, 'config.json')); } catch (e) { /* none */ }
+    return stopped;
 };
 Daemon.prototype.remote = function (on, lang) { return this.rc.set(on, lang); };
 // the web uid (remote.js's server): its own, never the fetch uid nor an app's; throws when there is none

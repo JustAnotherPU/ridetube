@@ -21,6 +21,7 @@ label{display:block;font-weight:600;margin:0 0 8px}
 textarea{width:100%;min-height:5.5em;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:10px 12px;resize:vertical}
 button{margin-top:12px;width:100%;min-height:48px;font:inherit;font-weight:600;color:#fff;background:var(--acc);border:0;border-radius:24px}
 button:disabled{opacity:.5}
+select{font:inherit;color:var(--fg);background:var(--bg)}
 #msg{min-height:1.5em;margin:12px 0 0}
 #msg.bad,#locked{color:var(--bad)}
 .hint{color:var(--mut);font-size:.9rem}
@@ -43,7 +44,7 @@ button:disabled{opacity:.5}
   </form>
   <section class="card" id="vlessCard">
     <label for="vlessProfile" data-t="Active VLESS profile">Active VLESS profile</label>
-    <select id="vlessProfile" style="width:100%;min-height:44px;font:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--bg);color:var(--fg)"><option value="off">VLESS off</option></select>
+    <select id="vlessProfile" ><option value="off">VLESS off</option></select>
     <button id="vlessApply" type="button" data-t="Use selected profile">Use selected profile</button>
     <p id="vlessSelectMsg" role="status"></p>
     <form id="vlessForm">
@@ -145,7 +146,7 @@ $('vlessForm').onsubmit = function (ev) {
   $('vlessSend').disabled = true; $('vlessMsg').textContent = '';
   api('POST', '/api/vless', { uri: uri }).then(function (j) {
     $('vlessMsg').textContent = T('Saved on the car: ') + String(j.profile || 'VLESS profile');
-    $('vlessMsg').className = ''; $('vless').value = '';
+    $('vlessMsg').className = ''; $('vless').value = ''; loadVless();
   }, function (e) { if (e.message) { $('vlessMsg').textContent = T(e.message); $('vlessMsg').className = 'bad'; } })
     .then(function () { $('vlessSend').disabled = false; });
 };

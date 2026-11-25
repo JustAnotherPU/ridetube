@@ -471,7 +471,7 @@ JSON block of the page that its script reads. The trust boundaries:
   a search 200 characters; a link must be a YouTube video link (parsed to its id), any other link is refused.
 - **The web uid to root.** The child reaches the daemon only through `/run/jap-ridetube-d/remote.sock` (made 0600
   under umask, then `<web uid>:root`), separate from `ctl.sock` and handled by its own three-command allowlist:
-  `search`, `play`, `status`. Root checks the id (`ID_RE`) and the query again; nothing else (auth, sign_out, feed,
+  `search`, `play`, `status`, plus the narrowly-scoped VLESS profile list/import/select operations. Root checks the id (`ID_RE`) and the query again; nothing else (auth, sign_out, feed,
   positions, send_logs, stop...) is answered. `status` gives the state, id, title and times only. A phone action less
   than 1 s after the last one is refused (each search costs a fetch). Queries lose control characters, zero-width and
   direction marks (they end up in the HMI's recent-search labels).
