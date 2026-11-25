@@ -54,7 +54,7 @@ const TAG = 'jap-ridetube-d-remote';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;   // ytd.js's ID_RE (root checks again with that one)
 const TOKEN_RE = /^Bearer ([0-9a-f]{32})$/;
 const IFACE_RE = /^[A-Za-z0-9_.-]{1,15}$/;
-const Q_MAX = 200, TEXT_MAX = 2048, BODY_MAX = 16 * 1024, LINE_MAX = 12288, FAIL_MAX = 10;
+const Q_MAX = 200, TEXT_MAX = 2048, BODY_MAX = 16 * 1024, LINE_MAX = 4096, FAIL_MAX = 10;
 const ASK_MS = 5000;
 const LANGS = ['en', 'fr', 'nl', 'de', 'es', 'it', 'pt', 'ru', 'zh-CN'];   // RideTube's languages (the app's catalogs)
 // the hosts a pasted link may name, and the paths that carry a video id
