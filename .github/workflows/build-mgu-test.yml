@@ -1,0 +1,84 @@
+name: Build RideTube MGU test release
+
+on:
+  push:
+    branches:
+      - feature/vless-xray-ridetube
+    paths:
+      - 'native/jap-ridetube-d/**'
+      - 'native/ytdec/**'
+      - '.github/workflows/build-mgu-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ridetube-mgu-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout RideTube
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Checkout MGU Store packer
+        uses: actions/checkout@v5
+        with:
+          repository: robertnisipeanu/mgu-store
+          path: mgu-store
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config ffmpeg file curl
+
+      - name: Build BMW ytdec target binary
+        working-directory: native/ytdec
+        run: |
+          make test
+          make target PYTHON=python3.12
+
+      - name: Build MGU Store tool-kit artifact
+        working-directory: native/jap-ridetube-d
+        env:
+          MGU_STORE: ${{ github.workspace }}/mgu-store
+          PYTHON: python3.12
+        run: |
+          chmod +x build.sh tools/*.sh check.sh
+          ./build.sh ../ytdec/build/target/ytdec
+
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: jap-ridetube-d-0.6.0-mgu-test
+          path: native/jap-ridetube-d/dist/jap-ridetube-d@0.6.0.tgz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish test release
+        if: startsWith(github.ref, 'refs/heads/feature/vless-xray-ridetube')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete v0.6.0-mgu-test --yes || true
+          gh release create v0.6.0-mgu-test \
+            native/jap-ridetube-d/dist/jap-ridetube-d@0.6.0.tgz \
+            --title "RideTube 0.6.0 — MGU VLESS test" \
+            --notes "Test build for BMW MGU ID7. Includes phone VLESS profile import and Xray-core integration. Not yet validated on a real head unit." \
+            --prerelease
