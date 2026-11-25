@@ -17,11 +17,11 @@ node --check "$here/ytd.js"
 node --check "$here/remote.js"
 node --check "$here/vless.js"
 [ -f "$here/vendor/jpeg-js/decoder.js" ] || sh "$here/tools/vendor_jpeg.sh"
-node "$here/test/test_ytd.js" >/dev/null
-node "$here/test/test_thumb.js" >/dev/null
+node "$here/test/test_ytd.js"
+node "$here/test/test_thumb.js"
 "$py" -I "$here/test/test_ytfetch.py"
-node "$here/test/test_proxy.js" >/dev/null
-node "$here/test/test_vless.js" >/dev/null
+node "$here/test/test_proxy.js"
+node "$here/test/test_vless.js"
 "$py" -I "$here/test/test_proxy.py"
 cp "$ytdec" "$here/build/ytdec"
 node "$MGU_STORE/deploy/hu" artifact "$here" --out "$here/dist"
