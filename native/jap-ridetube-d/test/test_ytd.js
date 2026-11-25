@@ -3289,7 +3289,7 @@ async function main() {
         const pid = fetchLog().pid;
         setMode('codec');
         d.child.kill('SIGKILL');                                 // death 1: the new ytdec reads the (VP9) index: exit 4
-        await waitUntil(() => fetchLog().pid !== pid, 4000);
+        await waitUntil(() => { const log = fetchLog(); return !!log && log.pid !== pid; }, 4000);
         assert.deepStrictEqual(fetchLog().argv.slice(1, 7), ['fetch', '--cache-dir', path.join(cache, 'ytdlp'), '--height', '720', '--avc1']);
         await c.waitFor((x) => x.ev === 'state' && x.state === 'playing', 4000);
         await sleep(100); tick(0);
