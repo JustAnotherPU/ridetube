@@ -61,7 +61,7 @@ jobs:
           PYTHON: python3.12
         run: |
           chmod +x build.sh tools/*.sh check.sh
-          ./build.sh ../ytdec/build/target/ytdec
+          sh -x ./build.sh ../ytdec/build/target/ytdec
 
       - name: Upload test package
         uses: actions/upload-artifact@v4
