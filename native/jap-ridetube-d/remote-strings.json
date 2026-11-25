@@ -34,13 +34,15 @@
     "Active VLESS profile": "Profil VLESS actif",
     "Use selected profile": "Utiliser le profil sélectionné",
     "VLESS off": "VLESS désactivé",
-    " (active)": " (actif)",
-    "VLESS selected. Connecting...": "Profil VLESS sélectionné. Connexion...",
-    "VLESS disabled": "VLESS désactivé",
     "Paste a vless:// profile link": "Collez un profil vless://",
     "Saved on the car: ": "Enregistré dans la voiture : ",
-    " (active · proxy ready)": " (actif · proxy prêt)",
-    " (active · connecting)": " (actif · connexion en cours)"
+    "Invalid profile selection": "Sélection de profil invalide",
+    "VLESS is unavailable": "VLESS indisponible",
+    "Paste a valid vless:// profile": "Collez un profil vless:// valide",
+    "Import limit reached: turn the phone page off and on": "Limite d’importation atteint : désactivez puis réactivez la page du téléphone",
+    "VLESS import is not available in this service version": "L’importation VLESS n’est pas disponible dans cette version du service",
+    "VLESS": "VLESS",
+    "VLESS profile": "Profil VLESS"
   },
   "nl": {
     "RideTube remote": "RideTube-afstandsbediening",
@@ -77,13 +79,15 @@
     "Active VLESS profile": "Actief VLESS-profiel",
     "Use selected profile": "Geselecteerd profiel gebruiken",
     "VLESS off": "VLESS uit",
-    " (active)": " (actief)",
-    "VLESS selected. Connecting...": "VLESS-profiel geselecteerd. Verbinden...",
-    "VLESS disabled": "VLESS uitgeschakeld",
     "Paste a vless:// profile link": "Plak een vless://-profiel",
     "Saved on the car: ": "Opgeslagen in de auto: ",
-    " (active · proxy ready)": " (actief · proxy gereed)",
-    " (active · connecting)": " (actief · verbinden)"
+    "Invalid profile selection": "Ongeldige profielkeuze",
+    "VLESS is unavailable": "VLESS is niet beschikbaar",
+    "Paste a valid vless:// profile": "Plak een geldig vless://-profiel",
+    "Import limit reached: turn the phone page off and on": "Importlimiet bereikt: schakel de telefoonpagina uit en weer in",
+    "VLESS import is not available in this service version": "VLESS-import is niet beschikbaar in deze serviceversie",
+    "VLESS": "VLESS",
+    "VLESS profile": "VLESS-profiel"
   },
   "de": {
     "RideTube remote": "RideTube-Fernbedienung",
@@ -120,13 +124,15 @@
     "Active VLESS profile": "Aktives VLESS-Profil",
     "Use selected profile": "Ausgewähltes Profil verwenden",
     "VLESS off": "VLESS aus",
-    " (active)": " (aktiv)",
-    "VLESS selected. Connecting...": "VLESS-Profil ausgewählt. Verbindung wird hergestellt...",
-    "VLESS disabled": "VLESS deaktiviert",
     "Paste a vless:// profile link": "VLESS-Profil einfügen",
     "Saved on the car: ": "Im Auto gespeichert: ",
-    " (active · proxy ready)": " (aktiv · Proxy bereit)",
-    " (active · connecting)": " (aktiv · Verbindung wird hergestellt)"
+    "Invalid profile selection": "Ungültige Profilauswahl",
+    "VLESS is unavailable": "VLESS ist nicht verfügbar",
+    "Paste a valid vless:// profile": "Gültiges vless://-Profil einfügen",
+    "Import limit reached: turn the phone page off and on": "Importlimit erreicht: Telefonseite aus- und wieder einschalten",
+    "VLESS import is not available in this service version": "VLESS-Import ist in dieser Dienstversion nicht verfügbar",
+    "VLESS": "VLESS",
+    "VLESS profile": "VLESS-Profil"
   },
   "es": {
     "RideTube remote": "Mando de RideTube",
@@ -163,13 +169,15 @@
     "Active VLESS profile": "Perfil VLESS activo",
     "Use selected profile": "Usar perfil seleccionado",
     "VLESS off": "VLESS desactivado",
-    " (active)": " (activo)",
-    "VLESS selected. Connecting...": "Perfil VLESS seleccionado. Conectando...",
-    "VLESS disabled": "VLESS desactivado",
     "Paste a vless:// profile link": "Pega un perfil vless://",
     "Saved on the car: ": "Guardado en el coche: ",
-    " (active · proxy ready)": " (activo · proxy listo)",
-    " (active · connecting)": " (activo · conectando)"
+    "Invalid profile selection": "Selección de perfil no válida",
+    "VLESS is unavailable": "VLESS no está disponible",
+    "Paste a valid vless:// profile": "Pega un perfil vless:// válido",
+    "Import limit reached: turn the phone page off and on": "Se alcanzó el límite de importación: apaga y vuelve a encender la página del móvil",
+    "VLESS import is not available in this service version": "La importación VLESS no está disponible en esta versión del servicio",
+    "VLESS": "VLESS",
+    "VLESS profile": "Perfil VLESS"
   },
   "it": {
     "RideTube remote": "Telecomando RideTube",
@@ -206,13 +214,15 @@
     "Active VLESS profile": "Profilo VLESS attivo",
     "Use selected profile": "Usa il profilo selezionato",
     "VLESS off": "VLESS disattivato",
-    " (active)": " (attivo)",
-    "VLESS selected. Connecting...": "Profilo VLESS selezionato. Connessione...",
-    "VLESS disabled": "VLESS disabilitato",
     "Paste a vless:// profile link": "Incolla un profilo vless://",
     "Saved on the car: ": "Salvato nell'auto: ",
-    " (active · proxy ready)": " (attivo · proxy pronto)",
-    " (active · connecting)": " (attivo · connessione in corso)"
+    "Invalid profile selection": "Selezione del profilo non valida",
+    "VLESS is unavailable": "VLESS non è disponibile",
+    "Paste a valid vless:// profile": "Incolla un profilo vless:// valido",
+    "Import limit reached: turn the phone page off and on": "Limite di importazione raggiunto: disattiva e riattiva la pagina del telefono",
+    "VLESS import is not available in this service version": "L’importazione VLESS non è disponibile in questa versione del servizio",
+    "VLESS": "VLESS",
+    "VLESS profile": "Profilo VLESS"
   },
   "pt": {
     "RideTube remote": "Comando do RideTube",
@@ -249,13 +259,15 @@
     "Active VLESS profile": "Perfil VLESS ativo",
     "Use selected profile": "Usar perfil selecionado",
     "VLESS off": "VLESS desligado",
-    " (active)": " (ativo)",
-    "VLESS selected. Connecting...": "Perfil VLESS selecionado. A ligar...",
-    "VLESS disabled": "VLESS desativado",
     "Paste a vless:// profile link": "Cole um perfil vless://",
     "Saved on the car: ": "Guardado no carro: ",
-    " (active · proxy ready)": " (ativo · proxy pronto)",
-    " (active · connecting)": " (ativo · a ligar)"
+    "Invalid profile selection": "Seleção de perfil inválida",
+    "VLESS is unavailable": "VLESS indisponível",
+    "Paste a valid vless:// profile": "Cole um perfil vless:// válido",
+    "Import limit reached: turn the phone page off and on": "Limite de importação atingido: desligue e ligue novamente a página do telefone",
+    "VLESS import is not available in this service version": "A importação VLESS não está disponível nesta versão do serviço",
+    "VLESS": "VLESS",
+    "VLESS profile": "Perfil VLESS"
   },
   "ru": {
     "RideTube remote": "Пульт RideTube",
@@ -292,13 +304,15 @@
     "Active VLESS profile": "Активный профиль VLESS",
     "Use selected profile": "Использовать выбранный профиль",
     "VLESS off": "VLESS выключен",
-    " (active)": " (активен)",
-    "VLESS selected. Connecting...": "Профиль VLESS выбран. Подключение...",
-    "VLESS disabled": "VLESS выключен",
     "Paste a vless:// profile link": "Вставьте ссылку профиля vless://",
     "Saved on the car: ": "Сохранено в машине: ",
-    " (active · proxy ready)": " (активен · прокси готов)",
-    " (active · connecting)": " (активен · подключается)"
+    "Invalid profile selection": "Неверный выбор профиля",
+    "VLESS is unavailable": "VLESS недоступен",
+    "Paste a valid vless:// profile": "Вставьте корректный профиль vless://",
+    "Import limit reached: turn the phone page off and on": "Достигнут лимит импорта: выключите и снова включите страницу телефона",
+    "VLESS import is not available in this service version": "Импорт VLESS недоступен в этой версии сервиса",
+    "VLESS": "VLESS",
+    "VLESS profile": "Профиль VLESS"
   },
   "zh-CN": {
     "RideTube remote": "RideTube 遥控",
@@ -335,12 +349,14 @@
     "Active VLESS profile": "当前 VLESS 配置",
     "Use selected profile": "使用所选配置",
     "VLESS off": "关闭 VLESS",
-    " (active)": "（已启用）",
-    "VLESS selected. Connecting...": "已选择 VLESS 配置。正在连接...",
-    "VLESS disabled": "VLESS 已禁用",
     "Paste a vless:// profile link": "粘贴 vless:// 配置",
     "Saved on the car: ": "已保存在车机：",
-    " (active · proxy ready)": "（已启用 · 代理就绪）",
-    " (active · connecting)": "（已启用 · 正在连接）"
+    "Invalid profile selection": "配置选择无效",
+    "VLESS is unavailable": "VLESS 不可用",
+    "Paste a valid vless:// profile": "粘贴有效的 vless:// 配置",
+    "Import limit reached: turn the phone page off and on": "导入次数已达上限：请关闭并重新开启手机页面",
+    "VLESS import is not available in this service version": "此服务版本不支持导入 VLESS",
+    "VLESS": "VLESS",
+    "VLESS profile": "VLESS 配置"
   }
 }
