@@ -17,7 +17,7 @@
  *   hotspot has no address; expires: seconds left; "error" when it could not be turned on) and, per phone action,
  *   {"ev":"remote_do","do":"search","q"} or {"ev":"remote_do","do":"play","id"}: the app carries it out itself.
  *
- * remote.sock (the child is its only client): JSON lines, at most 12 KiB each.
+ * remote.sock (the child is its only client): JSON lines, at most 4 KiB each.
  *   child -> root: search, play, status, list_vless, select_vless, import_vless.
  *   root -> child: one bounded JSON reply per rid; VLESS credentials are never returned to the phone.
  *   Those three only: root checks the id (ID_RE) and the query again, and nothing else reaches it (never ctl.sock's
