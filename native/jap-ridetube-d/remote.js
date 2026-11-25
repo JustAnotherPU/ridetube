@@ -307,6 +307,12 @@ Remote.prototype.onLine = function (r, c, line) {
         const s = this.h.status();
         return reply({ status: { state: s.state, id: s.id || null, title: s.title || null, elapsed: s.elapsed || 0, total: s.total || 0 } });
     }
+    case 'list_vless': return reply({ profiles: this.h.listVless ? this.h.listVless() : [] });
+    case 'select_vless': {
+        if (typeof m.key !== 'string' || (m.key !== 'off' && !/^[0-9a-f]{16}$/.test(m.key))) return reply({ error: 'Invalid profile selection' });
+        try { return reply(this.h.selectVless ? this.h.selectVless(m.key) : { error: 'VLESS is unavailable' }); }
+        catch (e) { return reply({ error: String(e.message || 'Could not select profile').slice(0, 160) }); }
+    }
     case 'import_vless': {
         if (typeof m.uri !== 'string' || m.uri.length > 8192 || m.uri.slice(0, 8) !== 'vless://') return reply({ error: 'Paste a valid vless:// profile' });
         if (r.imported >= 5) return reply({ error: 'Import limit reached: turn the phone page off and on' });
@@ -481,7 +487,7 @@ function serve() {
             reply(res, 200, 'text/html; charset=utf-8', page, { 'Content-Security-Policy': csp });
             return;
         }
-        if (p !== '/api/status' && p !== '/api/send' && p !== '/api/vless') { json(res, 404, { error: 'Not found' }); return; }
+        if (p !== '/api/status' && p !== '/api/send' && p !== '/api/vless' && p !== '/api/vless/list' && p !== '/api/vless/select') { json(res, 404, { error: 'Not found' }); return; }
         // the token first: the right one always passes (a flood of wrong ones never locks the passenger out)
         if (!authorised(req)) {
             const ip = String(req.socket.remoteAddress);
@@ -506,6 +512,17 @@ function serve() {
                 if (id === undefined && !q) { json(res, 400, { error: 'Type a search (at most 200 characters)' }); return; }   // (Q_MAX)
                 const req2 = id ? { cmd: 'play', id } : { cmd: 'search', q };
                 ask(req2).then((m) => (m.ok ? json(res, 200, { ok: true, did: req2.cmd }) : json(res, 422, { error: String(m.error || 'Not allowed') })), fail);
+            });
+        } else if (p === '/api/vless/list' && req.method === 'GET') {
+            ask({ cmd: 'list_vless' }).then((m) => json(res, 200, { profiles: Array.isArray(m.profiles) ? m.profiles : [] }), fail);
+        } else if (p === '/api/vless/select' && req.method === 'POST') {
+            if (!/^application\\/json\\b/.test(req.headers['content-type'] || '')) { json(res, 415, { error: 'Only JSON is accepted' }); return; }
+            readBody(req, (err, text) => {
+                if (err) { json(res, 413, { error: 'Too long' }); return; }
+                let b = null; try { b = JSON.parse(text); } catch (e) { /* below */ }
+                const key = b && typeof b.key === 'string' ? b.key : '';
+                if (key !== 'off' && !/^[0-9a-f]{16}$/.test(key)) { json(res, 400, { error: 'Invalid profile selection' }); return; }
+                ask({ cmd: 'select_vless', key: key }).then((m) => (m.ok ? json(res, 200, m) : json(res, 422, { error: m.error || 'Could not select profile' })), fail);
             });
         } else if (p === '/api/vless' && req.method === 'POST') {
             if (!/^application\/json\b/.test(req.headers['content-type'] || '')) { json(res, 415, { error: 'Only JSON is accepted' }); return; }

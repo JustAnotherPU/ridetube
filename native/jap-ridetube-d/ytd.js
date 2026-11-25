@@ -71,6 +71,9 @@ function defaults() {
         fetchCmd: [process.execPath, '--max-http-header-size=65536', __filename, '--fetch'],
         fetcher: ['/var/opt/mgu-python/current/bin/python3', '-I', path.join(here, 'ytfetch.py')],
         thumbCmd: ['/var/opt/jap-node22/current/bin/node', path.join(here, 'thumb.js')],
+        xrayBin: env.MGU_YT_XRAY || path.join(here, 'xray'),
+        xrayDir: env.MGU_YT_XRAY_DIR || '/run/jap-ridetube-d/xray',
+        xrayPort: 10808,
         startVideoMs: 6000,  // video fetched ahead before playback starts (later the buffering pause covers a slow link)
         fetchRetryMs: [3000, 8000], // a fetch failing before playback (the network): tried again after these waits
         h264Only: env.MGU_YT_H264 === '1', // internal escape hatch: never VP9 (ytfetch.py --avc1)
@@ -1418,9 +1421,14 @@ function Daemon(o) {
     if (this.childFetch) this.opts.ytRequest = (m, u, h, b, t) => this.fetch({ method: m, url: u, headers: h, body: b, timeoutMs: t });
     this.fetchUid = null;
     this.webUid = null;    // the phone remote's server (remote.js), picked when it is first turned on
+    this.vlessKey = (readJson(path.join(this.opts.stateDir, 'vless-active.json')) || {}).key || null;
+    this.xrayChild = null;
+    this.xrayReady = false;
+    this.xrayStarting = null;
     this.rc = new (require('./remote.js').Remote)(this.opts, {
         log: this.log, emit: (o) => this.emit(o), hasApp: () => !!this.client, shared: () => this.sockShared(), idRe: ID_RE,
         uid: () => this.remoteUid(), importVless: (uri) => this.importVless(uri),
+        listVless: () => this.listVless(), selectVless: (key) => this.selectVless(key),
         status: () => ({ state: this.state, id: this.cur ? this.cur.id : null, title: this.cur ? this.cur.title : null, elapsed: this.elapsed, total: this.total })
     });
     this.account = new Account(this.opts, (o) => this.emit(o), () => tvClient(this.hl, this.gl));
@@ -1479,6 +1487,12 @@ Daemon.prototype.spawnFetchUid = function (cmd, args, stdin) {
 // host:port alone; a setting that is wrong fails every request (never direct, which would bypass what the user set),
 // unless the app's switch is off: then direct, whatever the Store holds.
 Daemon.prototype.proxySetting = function () {
+    if (this.vlessKey) {
+        const s = this.xrayReady ? { proxy: proxy.parse('socks5://127.0.0.1:' + this.opts.xrayPort) } : { error: 'VLESS proxy is starting or unavailable' };
+        const key = JSON.stringify(proxy.toEnv(s));
+        if (key !== this.proxyKey) { if (this.proxyKey !== undefined) this.dropSpare(); this.proxyKey = key; this.log('network: ' + (s.error || 'through RideTube VLESS (local SOCKS5)')); }
+        return s;
+    }
     const raw = proxy.readSetting(this.opts.storeConf), s = this.proxyMode() === 'off' ? null : raw;
     const key = JSON.stringify(proxy.toEnv(s));   // a new password counts as a change too
     if (key !== this.proxyKey) {
@@ -1814,6 +1828,7 @@ Daemon.prototype.start = async function () {
     this.rc.cleanup();   // a phone remote rule an earlier run left (a crash): removed; nothing listens until it is turned on
     // the uplink learns our fetch uid at start (its 5 s rescan), before anyone signs in
     if (this.childFetch && this.fetchUid === null) { try { this.fetchUid = pickFetchUid(this.opts); } catch (e) { this.log('internet uid: ' + e.message); } }
+    if (this.vlessKey) { try { await this.startXray(); } catch (e) { this.log('VLESS: ' + e.message); } }
     this.timers.push(setInterval(() => this.guard(() => this.watchdog()), 1000));
     this.timers.push(setInterval(() => this.guard(() => this.keepWarm()), this.opts.tickMs));
     this.timers.push(setInterval(() => this.guard(() => this.lockSocket()), this.opts.tickMs));   // a reinstall can change the app's uid
@@ -2039,6 +2054,8 @@ Daemon.prototype.onLine = function (line) {
     case 'related': return this.related(m.id);
     case 'remote': return this.remote(m.on, m.lang);   // 0.4.1
     case 'proxy': return this.proxy(m.mode);
+    case 'vless_list': return this.emit({ ev: 'vless_list', profiles: this.listVless() });
+    case 'vless_select': try { return this.emit({ ev: 'vless_select', result: this.selectVless(m.key) }); } catch (e) { return this.emit({ ev: 'error', cmd: 'vless_select', msg: e.message }); }
     case 'library': return this.sendLibrary();   // 0.5.0
     case 'download': return this.download(m.id, m.meta, m.quality);
     case 'remove': return this.remove(m.id);
@@ -2090,24 +2107,97 @@ Daemon.prototype.related = async function (id) {
     return this.emit({ ev: 'related', id: id, items: items });
 };
 // `remote` {on} -> remote{on, url, expires} (remote.js; on not a bool: only the state). WP9, 0.4.1
+Daemon.prototype.vlessProfiles = function () {
+    const p = readJson(path.join(this.opts.stateDir, 'vless-profiles.json'));
+    return Array.isArray(p) ? p.filter((x) => x && typeof x.key === 'string' && /^[0-9a-f]{16}$/.test(x.key)) : [];
+};
+Daemon.prototype.listVless = function () {
+    return this.vlessProfiles().map((p) => ({ key: p.key, name: p.name, active: p.key === this.vlessKey }));
+};
 Daemon.prototype.importVless = function (uri) {
     // The phone page runs unprivileged; only this root-side hook parses and writes credentials.
     const parsed = require('./vless.js').parseUri(uri);
+    const key = crypto.createHash('sha256').update(parsed.id + '@' + parsed.address + ':' + parsed.port).digest('hex').slice(0, 16);
     const file = path.join(this.opts.stateDir, 'vless-profiles.json');
-    let profiles = [];
-    const old = readJson(file);
-    if (Array.isArray(old)) profiles = old.filter((p) => p && typeof p === 'object' && typeof p.id === 'string');
-    const name = parsed.address + ':' + parsed.port;
-    const next = profiles.filter((p) => p.name !== name);
-    next.push(Object.assign({ name: name, addedAt: new Date().toISOString() }, parsed));
-    if (next.length > 10) throw new Error('At most 10 VLESS profiles can be stored');
+    const profiles = this.vlessProfiles().filter((p) => p.key !== key);
+    profiles.push(Object.assign({ key: key, name: parsed.address + ':' + parsed.port, addedAt: new Date().toISOString() }, parsed));
+    if (profiles.length > 10) throw new Error('At most 10 VLESS profiles can be stored');
     mkdirp(this.opts.stateDir);
     const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(next) + '\n', { mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify(profiles) + '\n', { mode: 0o600 });
     fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, file);
     fs.chmodSync(file, 0o600);
-    return { name: name, server: parsed.address, port: parsed.port };
+    this.selectVless(key);
+    return { key: key, name: parsed.address + ':' + parsed.port, server: parsed.address, port: parsed.port };
+};
+Daemon.prototype.selectVless = function (key) {
+    if (key !== 'off' && !this.vlessProfiles().some((p) => p.key === key)) throw new Error('VLESS profile not found');
+    const next = key === 'off' ? null : key;
+    if (next === this.vlessKey) return { ok: true, active: next };
+    this.vlessKey = next;
+    const file = path.join(this.opts.stateDir, 'vless-active.json');
+    if (next) writeIfChanged(file, JSON.stringify({ key: next }) + '\n', 0o600);
+    else try { fs.unlinkSync(file); } catch (e) { /* none */ }
+    this.dropSpare();
+    if (next) this.startXray().catch((e) => this.log('VLESS: start failed (' + e.message + ')'));
+    else this.stopXray();
+    this.log('VLESS: ' + (next ? 'profile selected' : 'disabled'));
+    return { ok: true, active: next };
+};
+Daemon.prototype.startXray = function () {
+    if (!this.vlessKey) return Promise.resolve(false);
+    if (this.xrayReady && this.xrayChild && !this.xrayChild.killed) return Promise.resolve(true);
+    if (this.xrayStarting) return this.xrayStarting;
+    this.xrayStarting = new Promise((resolve, reject) => {
+        const profile = this.vlessProfiles().filter((p) => p.key === this.vlessKey)[0];
+        if (!profile) { this.xrayStarting = null; return reject(new Error('selected profile is missing')); }
+        const uid = this.uid(), dir = this.opts.xrayDir;
+        try {
+            if (!fs.existsSync(dir)) mkdirp(dir);
+            fs.chmodSync(dir, 0o700);
+            fs.chownSync(dir, uid, uid);
+            const config = require('./vless.js').makeConfig(profile, this.opts.xrayPort);
+            const lease = readJson(this.opts.leaseFile) || {};
+            if (Array.isArray(lease.dns) && lease.dns.length) config.dns = { servers: lease.dns.filter((x) => typeof x === 'string') };
+            const cf = path.join(dir, 'config.json');
+            fs.writeFileSync(cf, JSON.stringify(config) + '\n', { mode: 0o600 });
+            fs.chmodSync(cf, 0o600);
+            fs.chownSync(cf, uid, uid);
+            const child = cp.spawn(this.opts.xrayBin, ['run', '-c', cf], {
+                uid: uid, gid: uid, cwd: '/', env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
+                stdio: ['ignore', 'ignore', 'ignore']
+            });
+            this.xrayChild = child;
+            let done = false, tries = 0;
+            const finish = (err) => {
+                if (done) return; done = true; clearInterval(timer); clearTimeout(deadline);
+                this.xrayStarting = null;
+                if (err) { this.xrayReady = false; try { child.kill('SIGKILL'); } catch (e) { /* gone */ } reject(err); }
+                else { this.xrayReady = true; this.log('VLESS: local SOCKS5 ready'); resolve(true); }
+            };
+            child.once('error', (e) => finish(new Error('Xray could not start: ' + e.message)));
+            child.once('exit', (code, sig) => {
+                if (this.xrayChild === child) { this.xrayChild = null; this.xrayReady = false; this.dropSpare(); }
+                if (!done) finish(new Error('Xray exited before SOCKS5 was ready (' + (sig || code) + ')'));
+            });
+            const timer = setInterval(() => {
+                tries++;
+                const sock = net.connect({ host: '127.0.0.1', port: this.opts.xrayPort });
+                sock.once('connect', () => { sock.destroy(); finish(null); });
+                sock.once('error', () => { sock.destroy(); if (tries >= 100) finish(new Error('Xray SOCKS5 did not become ready')); });
+            }, 100);
+            const deadline = setTimeout(() => finish(new Error('Xray startup timed out')), 11000);
+        } catch (e) { this.xrayStarting = null; reject(e); }
+    });
+    return this.xrayStarting;
+};
+Daemon.prototype.stopXray = function () {
+    this.xrayReady = false;
+    this.xrayStarting = null;
+    const child = this.xrayChild; this.xrayChild = null;
+    if (child) { try { child.kill('SIGTERM'); } catch (e) { /* gone */ } }
+    try { fs.unlinkSync(path.join(this.opts.xrayDir, 'config.json')); } catch (e) { /* none */ }
 };
 Daemon.prototype.remote = function (on, lang) { return this.rc.set(on, lang); };
 // the web uid (remote.js's server): its own, never the fetch uid nor an app's; throws when there is none
@@ -3458,6 +3548,7 @@ Daemon.prototype.close = async function () {
     this.account.close();
     const rc = this.rc.close();   // the phone remote off and its rule removed, alongside the audio release (4 s exit)
     await Promise.all([this.stop(null), this.stopDownload()]);   // (a cut download starts again from scratch at the next start)
+    this.stopXray();
     await rc;
     if (this.client) this.client.destroy();
     if (this.server) this.server.close();
