@@ -2103,7 +2103,7 @@ Daemon.prototype.importVless = function (uri) {
     if (next.length > 10) throw new Error('At most 10 VLESS profiles can be stored');
     mkdirp(this.opts.stateDir);
     const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(next) + '\\n', { mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify(next) + '\n', { mode: 0o600 });
     fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, file);
     fs.chmodSync(file, 0o600);

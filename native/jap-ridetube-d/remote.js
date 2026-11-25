@@ -508,7 +508,7 @@ function serve() {
                 ask(req2).then((m) => (m.ok ? json(res, 200, { ok: true, did: req2.cmd }) : json(res, 422, { error: String(m.error || 'Not allowed') })), fail);
             });
         } else if (p === '/api/vless' && req.method === 'POST') {
-            if (!/^application\\/json\\b/.test(req.headers['content-type'] || '')) { json(res, 415, { error: 'Only JSON is accepted' }); return; }
+            if (!/^application\/json\b/.test(req.headers['content-type'] || '')) { json(res, 415, { error: 'Only JSON is accepted' }); return; }
             readBody(req, (err, text) => {
                 if (err) { json(res, 413, { error: 'Too long' }); return; }
                 let b = null;

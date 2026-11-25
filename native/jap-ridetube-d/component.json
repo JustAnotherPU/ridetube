@@ -34,11 +34,6 @@
       "mode": "0644"
     },
     {
-      "path": "vless.js",
-      "from": "vless.js",
-      "mode": "0644"
-    },
-    {
       "path": "remote.js",
       "from": "remote.js",
       "mode": "0644"
