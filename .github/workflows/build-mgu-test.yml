@@ -103,7 +103,7 @@ jobs:
                   assert p.stat().st_size == artifact['size'], f'size mismatch: {p}'
                   assert component.get('version'), f'missing version: {component["id"]}'
           app = components['jap_ridetube']
-          assert app['version'] == '0.6.4', app['version']
+          assert app['version'] == '0.6.5', app['version']
           assert app['requires']['jap-ridetube-d'] == components['jap-ridetube-d']['version']
           with tarfile.open(root / app['artifact']['name'], 'r:gz') as t:
               names = t.getnames()
