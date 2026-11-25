@@ -94,7 +94,6 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
 
-    app = json.load(open(os.path.join(ROOT, 'apps', APP, 'app.json')))
     tools = {t: json.load(open(os.path.join(ROOT, 'native', t, 'component.json'))) for t in TOOLS}
     if tools['jap-ridetube-d']['requires'].get('jap-node22') != NODE22['version']:
         sys.exit('release.py: jap-ridetube-d requires jap-node22 %s, NODE22 pins %s'
@@ -104,30 +103,15 @@ def main():
     built = re.search(r"^const BUILT = '(\d{4}-\d\d-\d\d)';", open(os.path.join(ROOT, 'native', 'jap-ridetube-d', 'ytd.js')).read(), re.M)
     if not built or built.group(1) > time.strftime('%Y-%m-%d', time.gmtime()):
         sys.exit("release.py: ytd.js BUILT must be today's date (UTC) or earlier: %s" % (built and built.group(1)))
-    pkg = os.path.join(ROOT, 'dist', '%s@%s.tgz' % (APP, app['version']))
-    if not os.path.isfile(pkg):
-        sys.exit('release.py: %s missing (python3 kit/tools/build.py %s)' % (pkg, APP))
-    n22 = node22(a.node22, out)   # before the local package goes (below): a refused jap-node22 costs no rebuild
-    strip_sdk(pkg, os.path.join(out, os.path.basename(pkg)), mtime)
-    # the local build's packages hold BMW's oap-sdk: only dist/release/ is ever uploaded, so they go
-    for f in (pkg, pkg[:-4] + '.mgu'):
-        if os.path.exists(f):
-            os.remove(f)
+    # The app is built by MGU Store on the head unit from this repo's mgu-repo.json.
+    # CI publishes only native tools and runtimes; BMW's SDK donor never enters GitHub artifacts.
+    n22 = node22(a.node22, out)
     for t, c in tools.items():
         kit = os.path.join(ROOT, 'native', t, 'dist', '%s@%s.tgz' % (t, c['version']))
         if not os.path.isfile(kit):
             sys.exit('release.py: %s missing (cd native/%s && ./build.sh)' % (kit, t))
         shutil.copy(kit, out)
-    icon = APP + '.png'
-    shutil.copy(os.path.join(ROOT, 'apps', APP, 'icon.png'), os.path.join(out, icon))
-    assert os.path.getsize(os.path.join(out, icon)) <= 128 * 1024
-
-    comps = [{
-        'id': APP, 'kind': 'app', 'title': app['title'], 'description': app['description'], 'version': app['version'],
-        'artifact': artifact(os.path.join(out, os.path.basename(pkg)), a.base),
-        'requires': {'jap-ridetube-d': tools['jap-ridetube-d']['version'], 'mgu-render': '0.6.11', 'mgu-inputgate': '1.0.0'},
-        'uninstallable': True, 'mguHmi': ['ID7'], 'icon': icon, 'iconSha256': sha256(os.path.join(out, icon)),
-    }]
+    comps = []
     for t, c in tools.items():
         e = {'id': t, 'kind': 'tool', 'title': c['title'], 'description': c['description'], 'version': c['version'],
              'artifact': artifact(os.path.join(out, '%s@%s.tgz' % (t, c['version'])), a.base),
