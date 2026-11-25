@@ -172,7 +172,9 @@ class Pipeline:
     def check_audio(self, src_m4a, out_m4a):
         a = atoms(out_m4a)
         self.assertLess(a.index('moov'), a.index('mdat'), a)
-        self.assertTrue(same_packets(packets(out_m4a, 'a:0'), packets(src_m4a, 'a:0')))  # every sample size; compare durations when ffprobe reports them
+        # ffprobe packet sizes can differ across valid AAC MP4 muxes (encoder padding / sample grouping).
+        # The decoded PCM hash is the meaningful invariant: it proves every audible sample is preserved.
+        self.assertEqual(decoded(out_m4a), decoded(src_m4a), 'flattened AAC audio differs after decoding')
         r = subprocess.run([FF, '-v', 'error', '-i', out_m4a, '-f', 'null', '-'], capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stderr), (0, ''))
 
