@@ -128,14 +128,14 @@ function loadVless() {
   api('GET', '/api/vless/list').then(function (j) {
     var sel = $('vlessProfile'), old = sel.value; sel.innerHTML = '';
     var off = document.createElement('option'); off.value = 'off'; off.textContent = T('VLESS off'); sel.appendChild(off);
-    (j.profiles || []).forEach(function (p) { var o = document.createElement('option'); o.value = p.key; o.textContent = String(p.name || 'VLESS') + (p.active ? T(' (active)') : ''); sel.appendChild(o); if (p.active) sel.value = p.key; });
+    (j.profiles || []).forEach(function (p) { var o = document.createElement('option'); o.value = p.key; o.textContent = String(p.name || 'VLESS') + (p.active ? T(p.ready ? ' (active · proxy ready)' : ' (active · connecting)') : ''); sel.appendChild(o); if (p.active) sel.value = p.key; });
     if (sel.value === 'off' && old !== 'off' && Array.prototype.some.call(sel.options, function (o) { return o.value === old; })) sel.value = old;
   }).catch(function () {});
 }
 $('vlessApply').onclick = function () {
   $('vlessApply').disabled = true; $('vlessSelectMsg').textContent = '';
   api('POST', '/api/vless/select', { key: $('vlessProfile').value }).then(function (j) {
-    $('vlessSelectMsg').textContent = T(j.active ? 'VLESS selected. Connecting...' : 'VLESS disabled'); loadVless();
+    $('vlessSelectMsg').textContent = T(j.active ? 'VLESS selected. Connecting...' : 'VLESS disabled'); loadVless(); if (j.active) setTimeout(loadVless, 2500);
   }, function (e) { if (e.message) { $('vlessSelectMsg').textContent = T(e.message); $('vlessSelectMsg').className = 'bad'; } })
     .then(function () { $('vlessApply').disabled = false; });
 };

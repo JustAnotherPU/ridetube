@@ -1488,6 +1488,7 @@ Daemon.prototype.spawnFetchUid = function (cmd, args, stdin) {
 // unless the app's switch is off: then direct, whatever the Store holds.
 Daemon.prototype.proxySetting = function () {
     if (this.vlessKey) {
+        if (!this.xrayReady && !this.xrayStarting) this.startXray().catch((e) => this.log('VLESS: start failed (' + e.message + ')'));
         const s = this.xrayReady ? { proxy: proxy.parse('socks5://127.0.0.1:' + this.opts.xrayPort) } : { error: 'VLESS proxy is starting or unavailable' };
         const key = JSON.stringify(proxy.toEnv(s));
         if (key !== this.proxyKey) { if (this.proxyKey !== undefined) this.dropSpare(); this.proxyKey = key; this.log('network: ' + (s.error || 'through RideTube VLESS (local SOCKS5)')); }
@@ -2112,7 +2113,7 @@ Daemon.prototype.vlessProfiles = function () {
     return Array.isArray(p) ? p.filter((x) => x && typeof x.key === 'string' && /^[0-9a-f]{16}$/.test(x.key)) : [];
 };
 Daemon.prototype.listVless = function () {
-    return this.vlessProfiles().map((p) => ({ key: p.key, name: p.name, active: p.key === this.vlessKey }));
+    return this.vlessProfiles().map((p) => ({ key: p.key, name: p.name, active: p.key === this.vlessKey, ready: p.key === this.vlessKey && this.xrayReady }));
 };
 Daemon.prototype.importVless = function (uri) {
     // The phone page runs unprivileged; only this root-side hook parses and writes credentials.

@@ -218,7 +218,9 @@
   "VLESS selected. Connecting...": "Профиль VLESS выбран. Подключение...",
   "VLESS disabled": "VLESS выключен",
   "Paste a vless:// profile link": "Вставьте ссылку профиля vless://",
-  "Saved on the car: ": "Сохранено в машине: "
+  "Saved on the car: ": "Сохранено в машине: ",
+  " (active · proxy ready)": " (активен · прокси готов)",
+  " (active · connecting)": " (активен · подключается)"
  },
  "zh-CN": {
   "RideTube remote": "RideTube 遥控",
