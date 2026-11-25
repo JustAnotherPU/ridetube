@@ -24,7 +24,7 @@ function parseFragment(raw) {
     if (!raw) return null;
     let fm;
     try { fm = JSON.parse(raw); } catch (e) { throw new Error('invalid fm JSON'); }
-    if (!fm || fm.type !== 'fragment' || !fm.tcp || !Array.isArray(fm.tcp) || fm.tcp.length !== 1) {
+    if (!fm || !fm.tcp || !Array.isArray(fm.tcp) || fm.tcp.length !== 1) {
         throw new Error('unsupported fm format');
     }
     const f = fm.tcp[0];
