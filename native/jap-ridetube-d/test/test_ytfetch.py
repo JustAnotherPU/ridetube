@@ -54,6 +54,14 @@ def packets(path, sel):
     return [line.split(',')[:2] for line in out.split()]
 
 
+def same_packets(a, b):
+    """Compare AAC packet sizes and known durations; ffprobe may report the first duration as N/A."""
+    if len(a) != len(b):
+        return False
+    return all(x[0] == y[0] and (x[1] == 'N/A' or y[1] == 'N/A' or x[1] == y[1])
+               for x, y in zip(a, b))
+
+
 def probe(path, entries):
     return json.loads(subprocess.run([FFPROBE, '-v', 'error', '-show_entries', entries, '-of', 'json', path],
                                      check=True, capture_output=True, text=True, encoding='utf-8').stdout)
@@ -164,7 +172,7 @@ class Pipeline:
     def check_audio(self, src_m4a, out_m4a):
         a = atoms(out_m4a)
         self.assertLess(a.index('moov'), a.index('mdat'), a)
-        self.assertEqual(packets(out_m4a, 'a:0'), packets(src_m4a, 'a:0'))  # every sample, same size+duration
+        self.assertTrue(same_packets(packets(out_m4a, 'a:0'), packets(src_m4a, 'a:0')))  # every sample size; compare durations when ffprobe reports them
         r = subprocess.run([FF, '-v', 'error', '-i', out_m4a, '-f', 'null', '-'], capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stderr), (0, ''))
 
@@ -1032,7 +1040,7 @@ class Online(unittest.TestCase, Pipeline):
             self.check_audio(src['a'], os.path.join(out, 'audio.m4a'))
             remux = os.path.join(tmp, 'remux.m4a')  # what server.py produced
             ff('-i', src['a'], '-map', '0:a:0', '-c', 'copy', '-movflags', '+faststart', remux)
-            self.assertEqual(packets(remux, 'a:0'), packets(os.path.join(out, 'audio.m4a'), 'a:0'))
+            self.assertTrue(same_packets(packets(remux, 'a:0'), packets(os.path.join(out, 'audio.m4a'), 'a:0')))
         finally:
             shutil.rmtree(tmp)
 
