@@ -31,7 +31,9 @@ function family(name) {
 /** Smallest baked size >= requested (downscaling looks better), else largest. */
 function get(name, size, text) {
     // Shared supplemental atlases avoid duplicating glyphs in every numeric size.
-    if (text && /[\u3000-\u9fff\uff00-\uffef]/.test(text)) {
+    // Hangul (a Korean label or title): the Korean atlas (Korean words, the 2,350 KS X 1001 syllables, ASCII)
+    if (text && /[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]/.test(text) && family('korean')) name = 'korean';
+    else if (text && /[\u3000-\u9fff\uff00-\uffef]/.test(text)) {
         name = 'cjk';
         const primary = family(name), titles = family('cjk-titles');
         if (titles && (!primary || Array.from(text).some((ch) => !primary[0].glyphs[ch.codePointAt(0)]))) {

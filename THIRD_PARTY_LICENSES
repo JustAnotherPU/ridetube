@@ -117,8 +117,10 @@ RideTube itself is GPL-3.0-or-later (LICENSE). The parts below come from others.
    meriyah (ISC, Copyright (c) 2019 and later, KFlash and others) and astring (MIT, Copyright (c) 2015,
    David Bonnet), with their notices kept inside that file.
 
-6. Fonts baked into kit/runtime/fonts: Ubuntu (Ubuntu Font Licence 1.0, kit/runtime/fonts/UFL-Ubuntu.txt) and
-   Noto Sans SC (SIL Open Font License 1.1, kit/runtime/fonts/OFL-NotoSansSC.txt).
+6. Fonts baked into kit/runtime/fonts: Ubuntu (Ubuntu Font Licence 1.0, kit/runtime/fonts/UFL-Ubuntu.txt),
+   Noto Sans SC (SIL Open Font License 1.1, kit/runtime/fonts/OFL-NotoSansSC.txt) and, for Korean
+   (kit/localization/fonts/korean.json), Noto Sans CJK KR (SIL Open Font License 1.1,
+   kit/runtime/fonts/OFL-NotoSansKR.txt).
 
 8. SponsorBlock - skip segments come from the SponsorBlock API (sponsor.ajay.app) at run time; its data is
    licensed CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/). The app credits it on its

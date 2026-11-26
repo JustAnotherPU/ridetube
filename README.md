@@ -2,7 +2,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-RideTube shows in English, French, Dutch, German, Spanish, Italian, Portuguese, Russian or Simplified Chinese
+RideTube shows in English, French, Dutch, German, Spanish, Italian, Portuguese, Russian, Simplified Chinese or Korean
 (Language setting). Chinese translation by 小白151
 (JackieZ123430). The [Chinese guide](README.zh-CN.md) includes setup, playback settings, and font coverage.
 
@@ -77,7 +77,7 @@ keeps out of that strip. Health check's width row says which one you have.
 ## Settings
 
 - **Language**: Auto (follows the car's language when RideTube has it, else English), English, Français,
-  Nederlands, Deutsch, Español, Italiano, Português, Русский or 中文. YouTube's language and country follow the car's iDrive language setting (on Auto; the
+  Nederlands, Deutsch, Español, Italiano, Português, Русский, 中文 or 한국어. YouTube's language and country follow the car's iDrive language setting (on Auto; the
   country always), so feeds and search match what the car is set to.
 - **Video while driving**: off by default. Leave it off unless the car is coded for video in motion and only
   passengers can see the screen. Switched on, it first shows a disclaimer and counts only once you press I agree;
@@ -168,8 +168,8 @@ The tests need Node 18 or newer, Python 3.12 and ffmpeg.
 
 ## Translations
 
-The app's menus come in English, French, Dutch, German, Spanish, Italian, Portuguese, Russian and Simplified
-Chinese. Pull requests that add a language are welcome, and I will merge them. If you would rather not do it
+The app's menus come in English, French, Dutch, German, Spanish, Italian, Portuguese, Russian, Simplified
+Chinese and Korean. Pull requests that add a language are welcome, and I will merge them. If you would rather not do it
 yourself, open an issue that names the language you want.
 
 To add one:
