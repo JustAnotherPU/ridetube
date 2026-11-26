@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+Repeat loops the video you're watching, for a music video on repeat, with nothing downloaded again.
+
+- Repeat is in the player's overlay (middle left, beside Close), in the podcast view's header while driving, and in the menu (Repeat on / off). It is also a setting and stays on until you switch it off.
+- With Repeat on, the service plays the video again from 0:00 when it reaches the end, instead of ending it. There is no "Preparing", no Up next, and no new YouTube lookup. The audio, already complete on the car, plays again from the start. Of the video, only its first minutes are fetched again, because the car keeps just a window of it in memory. A downloaded video loops with nothing fetched at all.
+- Repeat needs the updated service, which adds a `loop` command. With an older service the control doesn't show.
+- Fixed in the service: a stop that came while a resumed (or looped) video was restarting the car's player left a wait behind. The next video's first time update then went to that wait, so the video skipped its resume point.
+- Translated into all the app's languages.
+
 ## App 0.6.4 and service 0.5.4
 
 Resuming a video now picks up where you last stopped, even if that was on another device.
