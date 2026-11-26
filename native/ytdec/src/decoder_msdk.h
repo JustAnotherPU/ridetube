@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Robert Nisipeanu
-// Modified 2026-11 by JustAnotherPU for RideTube (GPL-3.0 section 5(a)): frames in display order with their timestamps, VPP fit/fill into the output size, NV12 planes out, VP9 through the unit's MSDK VP9 plugin.
+// Modified 2026-11 by JustAnotherPU for RideTube (GPL-3.0 section 5(a)): frames in display order with their timestamps, VPP fit/fill into the output size (or the picture alone at most at source size), NV12 planes out, VP9 through the unit's MSDK VP9 plugin.
 // From github.com/robertnisipeanu/idrive-apps, native/waze-on-cluster/src/decoder_msdk.h.
 /* Hardware H.264 decoder: Annex-B byte stream in, NV12 frames out.
  *
@@ -71,7 +71,7 @@
 namespace woc {
 
 struct VideoFrame {
-    uint32_t w, h;        /* the output size (letterbox bars included) */
+    uint32_t w, h;        /* the output size (letterbox bars included; no_upscale: none) */
     uint16_t corrupted;   /* MSDK's mfxFrameData::Corrupted flags; 0: decoded whole */
     int64_t pts_ms;       /* the timestamp fed with this frame's access unit; -1 unknown */
     /* NV12 planes, the decoder's buffer, valid until the next
@@ -92,8 +92,10 @@ public:
 
     /* dev: the render node, "/dev/dri/renderD128". out_w/out_h: output size,
      * even, or both 0 for the stream's own size. fill: crop the picture to
-     * fill out_w x out_h; otherwise fit it inside, black bars around. */
-    bool init(const char *dev, uint32_t out_w, uint32_t out_h, bool fill, std::string *err);
+     * fill out_w x out_h; otherwise fit it inside, black bars around.
+     * no_upscale: frames are the picture alone (no bars), at most the
+     * source's resolution, so their size follows the stream (fit.h). */
+    bool init(const char *dev, uint32_t out_w, uint32_t out_h, bool fill, bool no_upscale, std::string *err);
 
     /* Feeds Annex-B bytes, split anywhere; cb gets each decoded frame.
      * end_of_au: the bytes end exactly at the end of an access unit (one

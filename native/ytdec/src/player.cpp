@@ -61,6 +61,7 @@ bool Player::open_inputs(int64_t now)
     emit_(b);
     log_(std::string("ready: ") + b);
     ready_ = true;
+    idle_since_ = now;   /* paused before the files came: its first frame is still to show */
     if (target_ >= 0)
         seek(target_, now);   /* a seek that came before the files */
     return true;
@@ -77,11 +78,24 @@ void Player::codec_failed(const std::string &msg)
     fatal = kCodecFailed;
 }
 
+/* The decoder's flush ends its MSDK session; the next feed after a seek
+ * starts a new one. Frames still held are dropped: a seek follows. */
+void Player::close_idle(const char *why)
+{
+    dec_->flush([](const woc::VideoFrame &) {});
+    for (auto &s : queue_)
+        pool_.push_back(std::move(s.i420));
+    queue_.clear();
+    log_(std::string("idle: decoder closed (") + why + ")");
+}
+
 void Player::seek(int64_t ms, int64_t now)
 {
     if (ms < 0)
         ms = 0;
     frozen_ = ms;
+    if (paused_)
+        idle_since_ = now;   /* the frame it shows needs the decoder: idle again from now */
     if (has_clock_)
         elapsed_ = ms, mono_ = now;   /* until the next clock line: the audio jumps there too */
     target_ = ms;
@@ -92,6 +106,7 @@ void Player::seek(int64_t ms, int64_t now)
         pool_.push_back(std::move(s.i420));
     queue_.clear();
     next_ = idx_.seek_point((uint32_t)ms, video_fd_);
+    closed_ = false;
     max_fed_ = -1;
     last_out_pts_ = -1;
     still_ = true;
@@ -118,24 +133,34 @@ void Player::on_frame(const woc::VideoFrame &f, int64_t now)
         dropped++;
         return;
     }
-    if (f.w != out_->w() || f.h != out_->h()) {
-        log_("decoder frame size differs from the output: dropped");
-        dropped++;
-        return;
-    }
     Staged s;
     s.pts = pts;
+    s.w = f.w, s.h = f.h;
     if (!pool_.empty()) {
         s.i420 = std::move(pool_.back());
         pool_.pop_back();
     }
-    s.i420.resize(out_->frame_size());
+    s.i420.resize((size_t)f.w * f.h * 3 / 2);
     nv12_to_i420(f.y, f.uv, f.pitch, f.w, f.h, s.i420.data());
     queue_.push_back(std::move(s));
 }
 
 void Player::show(Staged &s, int64_t now)
 {
+    /* The MGVF frame follows the decoder's (--no-upscale: the stream's size, a new SPS may change it). Here, not in
+     * on_frame: frames of the old size may still be queued. */
+    if (fatal)
+        return;   /* a resize failed: the file is closed, main exits */
+    if (s.w != out_->w() || s.h != out_->h()) {
+        std::string err;
+        if (!out_->resize(s.w, s.h, &err)) {
+            emit_("{\"ev\":\"error\",\"msg\":\"mgvf: " + err + "\"}");
+            log_("mgvf: " + err);
+            fatal = 2;
+            return;
+        }
+        log_("frame " + std::to_string(s.w) + "x" + std::to_string(s.h) + ": the MGVF file follows");
+    }
     memcpy(out_->begin(), s.i420.data(), s.i420.size());
     out_->commit();
     shown++;
@@ -220,7 +245,12 @@ int Player::step(int64_t now)
         return 100;   /* main exits */
     if (!open_inputs(now))
         return 100;
-    if (!video_on_)
+    /* not while a frame is still owed (still_): the paused picture must come first */
+    if (paused_ && video_on_ && !closed_ && !flushed_ && !still_ && now - idle_since_ >= kIdleMs) {
+        close_idle("paused");
+        closed_ = true;
+    }
+    if (!video_on_ || closed_)
         return 100;
 
     while (!queue_.empty()) {
@@ -283,9 +313,13 @@ bool Player::command(const std::string &line, int64_t now)
             frozen_ = a;
     } else if (cmd == "pause") {
         frozen_ = pos(now);
+        if (!paused_)
+            idle_since_ = now;
         paused_ = true;
     } else if (cmd == "resume") {
         if (paused_) {
+            if (closed_)
+                seek(frozen_, now);   /* a new decoder session from the keyframe before it */
             paused_ = false;
             elapsed_ = frozen_, mono_ = now;
         }
@@ -294,9 +328,7 @@ bool Player::command(const std::string &line, int64_t now)
     } else if (cmd == "video" && sscanf(line.c_str(), "%*s %lld", &a) == 1) {
         if (!a && video_on_) {
             video_on_ = false;
-            for (auto &s : queue_)
-                pool_.push_back(std::move(s.i420));
-            queue_.clear();
+            close_idle("video 0");   /* video 1 seeks */
         } else if (a && !video_on_) {
             video_on_ = true;
             seek(has_clock_ ? pos(now) : last_shown_pts >= 0 ? last_shown_pts : frozen_, now);

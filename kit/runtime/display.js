@@ -92,6 +92,8 @@ class Display {
         this.labels = {};                            // bar labels the app changed (ui.text)
         this.barOff = 0;                             // how far the HMI has scrolled its bar left
         this.tickHandlers = [];
+        this.wakeHandlers = [];                      // ctx.loop: input came, draw at full speed again (loop.js)
+        this.changes = 0;                            // frames sent that differ from the one before (loop.js)
         this.layoutHandlers = [];                    // ctx.onLayout: where the frame goes changed
         this.bgShown = null;
         this.place = null;
@@ -99,7 +101,7 @@ class Display {
         this.sheet = null;                           // sheet.js page drawn over the app's (openSheet)
         this.ccuLast = null;                         // last controller state (knob counter, press, push)
         this.ownHidden = new Set();                  // more bar buttons left out where the kit runs the screen (hideButton)
-        G.onConfirm(() => { this.lastWords = null; this.tickHandlers.forEach((fn) => fn()); });   // a reset asks / runs out
+        G.onConfirm(() => { this.lastWords = null; this._next(); });   // a reset asks / runs out
         const canvasScreens = (spec.screens || []).filter((s) => s.kind === 'canvas');
         this.screen = canvasScreens[0] || null;
         if (!this.screen) return;
@@ -130,6 +132,7 @@ class Display {
             // Settings and back), take this as the screen having focus again
             const inFront = () => { if (this.ui._setFocus) this.ui._setFocus(this.screen.name, true); };
             c.on('action', () => {
+                this.wake();
                 inFront();
                 this._syncVisible();            // a tap on the bar went to the HMI: the renderer hid us
                 this.pressed = b[0]; this.pressedT = Date.now(); this._repaint();
@@ -137,6 +140,7 @@ class Display {
             });
             c.on('focus', (ev) => {
                 if (!ev || typeof ev.value !== 'boolean') return;          // (row-only events)
+                this.wake();
                 if (ev.value) { inFront(); this.focused = b[0]; this.focusTab = null; this.focusKey = 'bar:' + b[0]; this._scroll(); } else if (this.focused === b[0]) this.focused = null;
                 this._repaint();
             });
@@ -188,8 +192,14 @@ class Display {
                 this._lost();                       // (shows the HMI's bar again)
             }, 1500);
         });
-        gpu.on('ccu', (v) => { if (this.gpu !== gpu) return; if (this.onCcu && !this.own()) this.onCcu(v); else this._ccu(v); });
-        gpu.on('touch', (phase, x, y) => { if (this.gpu === gpu) this._touch(phase, x, y); });
+        gpu.on('ccu', (v) => {
+            if (this.gpu !== gpu) return;
+            // (a state the same as the last one is no input)
+            const k = v.frontRotaryEncoderOperation + ':' + v.frontRotaryEncoderPushButton + ':' + v.frontRotaryEncoderDeflection;
+            if (k !== this.ccuWake) { this.ccuWake = k; this.wake(); }
+            if (this.onCcu && !this.own()) this.onCcu(v); else this._ccu(v);
+        });
+        gpu.on('touch', (phase, x, y) => { if (this.gpu === gpu) { this.wake(); this._touch(phase, x, y); } });
         // the HMI was touched outside the tabs: shown again unless that left the screen
         gpu.on('closed', () => setTimeout(() => { if (this.gpu === gpu) this._syncVisible(); }, 700));
         G.onLayerDrop((id) => { if (this.gpu) this.gpu.dropLayer(id); });
@@ -264,6 +274,7 @@ class Display {
         if (!this.sheet) this.saved = this.app;          // the app's last frame, back when the sheet closes
         this.sheetHead = false;
         this.sheet = sheet; this.sheetDown = -1;
+        this.wake();
         if (!this.sheetTimer) this.sheetTimer = setInterval(() => this._paintSheet(), 33);   // scrolling glides
         this._paintSheet();
         return true;
@@ -276,7 +287,7 @@ class Display {
         if (this.saved) { this.app = this.saved; this.saved = null; }
         this.lastWords = null;
         this._repaint();
-        this.tickHandlers.forEach((fn) => fn());         // the app draws its next frame
+        this._next();                                    // the app draws its next frame
         if (sh.onClose) try { sh.onClose(); } catch (e) { this.log.error(e); }
     }
     /** Run fn (the sheet's press, back or a target's act; from the socket's data handler) and act on what it returns. */
@@ -383,6 +394,7 @@ class Display {
      * or at once when the knob turns. It starts where the controller is.
      */
     pointerMove(dx, dy) {
+        this.wake();
         if (this.sheet || !this.own()) return;   // shortcut: sheets keep the knob only; upgrade by hit-testing sheetTargets
         const pl = this.place, now = Date.now();
         if (!this.ptrShown()) {
@@ -399,6 +411,7 @@ class Display {
     }
     /** a tap on the pad: presses what the pointer is on (true), else nothing (false) */
     pointerTap() {
+        this.wake();
         if (!this.ptrShown() || this.sheet) return false;
         this._pointAt();
         const p = this._ring().find((q) => q.k === this.focusKey && !q.scroll);
@@ -431,6 +444,7 @@ class Display {
     focusPage(key) { this._focus(key ? { k: 'tgt:' + key, tgt: { key: String(key) } } : null); this._repaint(); }
     /** ctx.scroll: what the page shows moved by dy logical px (+ = further down): an open sheet's list, else a scrolling page. */
     scrollPage(dy) {
+        this.wake();
         if (this.sheet) { if (!this.sheet.scroll) return false; this.sheet.scroll(dy); if (this.sheet.release) this.sheet.release(); this._paintSheet(); return true; }
         const moved = !!(this.pageScroll && this.onScroll && this._scrollBy(dy));
         if (moved && this.ptrShown()) setTimeout(() => { if (this.ptrShown()) { this._pointAt(); this._repaint(); } }, 120);   // the page moved under it
@@ -440,7 +454,7 @@ class Display {
     _scrollBy(dy) {
         let moved = false;
         try { moved = !!this.onScroll(dy); } catch (e) { this.log.error('scroll', e); }
-        if (moved) this.tickHandlers.forEach((fn) => fn());
+        if (moved) this._next();
         return moved;
     }
     /** Where place p of the ring is on screen (the surface's px): { x, y, w, h }. */
@@ -521,7 +535,7 @@ class Display {
                     if (this.dragging) {
                         let moved = false;
                         try { moved = !!this.onSwipe(this.lastX - x); } catch (e) { this.log.error('swipe', e); }
-                        if (moved) this.tickHandlers.forEach((fn) => fn());
+                        if (moved) this._next();
                     }
                 }
                 if (!this.sheet && this.pageScroll && this.onScroll && !bar && !tab && this.downAt) {
@@ -591,7 +605,7 @@ class Display {
             Promise.resolve(L.softImage(L.name, cv)).catch(() => {});
         }
         this._hmiBar();
-        this.tickHandlers.forEach((fn) => fn());
+        this._next();
         this.layoutKey = null;
         this._layoutChanged();
     }
@@ -671,7 +685,7 @@ class Display {
         if (key !== this.layoutKey) { this.layoutKey = key; this._layoutChanged(); }
     }
     /** Apps that draw only on changes draw again: the last frame has the old layout (bar, header, place). */
-    _layoutChanged() { this.layoutHandlers.forEach((fn) => { try { fn(); } catch (e) { this.log.error('layout', e); } }); }
+    _layoutChanged() { this.wake(); this.layoutHandlers.forEach((fn) => { try { fn(); } catch (e) { this.log.error('layout', e); } }); }
 
     /** No bar under the page: one that reaches down (it read the recorder's extra) starts as over the slim bar, any other is centred. */
     _reach(reaches) {
@@ -803,7 +817,9 @@ class Display {
         // unchanged frame (parked car, steady values): nothing to send - but at least one a
         // second, the renderer hides an app that goes quiet for 3 s (hung app over the HMI)
         const now = Date.now();
-        if (!force && this.lastWords && now - this.lastSent < 1000 && this.lastWords.length === w.byteLength && Buffer.from(w.buffer, w.byteOffset, w.byteLength).equals(this.lastWords)) return;
+        const same = !force && this.lastWords && this.lastWords.length === w.byteLength && Buffer.from(w.buffer, w.byteOffset, w.byteLength).equals(this.lastWords);
+        if (same && now - this.lastSent < 1000) return;
+        if (!same) this.changes++;                       // (the keepalive resend is no change)
         this.lastSent = now;
         this.gpu.frame(out);
         this.lastWords = Buffer.from(Buffer.from(w.buffer, w.byteOffset, w.byteLength));
@@ -1029,6 +1045,11 @@ class Display {
     }
 
     onTick(fn) { this.tickHandlers.push(fn); }
+    /** Input came (touch, controller, bar, sheet, scrolling, layout): loops waiting on a still page draw at full speed again. */
+    onWake(fn) { this.wakeHandlers.push(fn); }
+    wake() { this.wakeHandlers.forEach((fn) => { try { fn(); } catch (e) { this.log.error('wake', e); } }); }
+    /** Not a renderer tick: the app's next frame now, at full speed. */
+    _next() { this.wake(); this.tickHandlers.forEach((fn) => fn()); }
     onLayout(fn) { this.layoutHandlers.push(fn); }
 }
 

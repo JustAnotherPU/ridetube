@@ -7,7 +7,17 @@
  * true at CLOCK_MONOTONIC mono_ms; pos(now) = elapsed + (now - mono). Before
  * the first clock line, and while paused, the player shows one frame (the
  * first, or the one a seek landed on) and holds. A frame is shown once
- * pts <= pos + kLead, dropped when more than 2 frame durations late. */
+ * pts <= pos + kLead, dropped when more than 2 frame durations late.
+ *
+ * Idle: the decoder's flush() ends its MSDK session (MFXClose), whose worker
+ * thread otherwise wakes ~855 times/s with nothing to decode (car, 24/11:
+ * ~4 % of a core for as long as a video sits paused). So the session is
+ * flushed on `video 0`, and after kIdleMs of `pause` (closed_); at eof the
+ * player's own flush has already ended it. The MGVF file and its last frame
+ * stay, so the paused picture stays on screen, and the process stays (when
+ * ytdec exits, the app drops the video). `resume` while closed_ seeks to the
+ * paused position first, which starts a new session at the keyframe before
+ * it; `seek` and `video 1` seek anyway. */
 #ifndef YTDEC_PLAYER_H
 #define YTDEC_PLAYER_H
 
@@ -51,6 +61,7 @@ public:
     static const int kLead = 8;            /* ms a frame may be shown early */
     static const size_t kQueue = 3;        /* decoded frames held ahead */
     static const int kStatsMs = 2000;
+    static const int kIdleMs = 60000;      /* paused this long: the decoder session closes */
 
     Player(const std::string &dir, VideoDecoder *dec, Mgvf *out, Emit emit, Log log,
            std::function<double()> cpu_pct);
@@ -76,6 +87,7 @@ public:
 private:
     struct Staged {
         int64_t pts;
+        uint32_t w, h;   /* the decoder's frame size (--no-upscale: the stream's, not the rect) */
         std::vector<uint8_t> i420;
     };
 
@@ -88,6 +100,7 @@ private:
     bool feed_one(int64_t now);
     void stats(int64_t now);
     void codec_failed(const std::string &msg);
+    void close_idle(const char *why);
 
     std::string dir_;
     VideoDecoder *dec_;
@@ -110,6 +123,8 @@ private:
     int64_t last_poll_ = -1000000;
     int64_t end_since_ = -1;         /* every known record fed since then */
     uint64_t fed_ = 0;               /* records fed in all */
+    bool closed_ = false;            /* idle: decoder flushed while paused, a seek before the next feed */
+    int64_t idle_since_ = -1;        /* paused (or a seek while paused) since */
 
     bool has_clock_ = false, paused_ = false;
     int64_t elapsed_ = 0, mono_ = 0, frozen_ = 0;

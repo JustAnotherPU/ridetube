@@ -120,6 +120,37 @@ test('unchanged frames: not sent again, but one a second (the renderer hides an 
     } finally { t.end(); }
 });
 
+test('what slows ctx.loop down on a still page (loop.js): changes counted, the keepalive is none; input wakes it', async () => {
+    const t = await setup(), c = t.c;
+    let wakes = 0;
+    t.d.onWake(() => { wakes++; });
+    try {
+        page(t.d, 10); await sleep(SHOW_WAIT);           // (shown: the next frame goes out for sure, a change)
+        page(t.d, 10); await sleep(20);
+        const n = t.d.changes;
+        page(t.d, 10); await sleep(20);
+        assert.strictEqual(t.d.changes, n, 'the same page again: no change');
+        await sleep(1100);
+        const f = c.frames.length;
+        page(t.d, 10); await sleep(20);
+        assert.strictEqual(c.frames.length, f + 1, 'the keepalive resend went out');
+        assert.strictEqual(t.d.changes, n, 'and is no change');
+        page(t.d, 30); await sleep(20);
+        assert.strictEqual(t.d.changes, n + 1, 'a changed page');
+        assert.strictEqual(wakes, 0, 'frames alone wake nothing');
+        c.send(X_CCU, ccu(5, 0, 0)); await sleep(30);
+        assert.strictEqual(wakes, 1, 'the controller turned');
+        c.send(X_CCU, ccu(5, 0, 0)); await sleep(30);
+        assert.strictEqual(wakes, 1, 'the same controller state again is no input');
+        c.send(X_CCU, ccu(5, 1, 0)); await sleep(30);
+        assert.strictEqual(wakes, 2, 'pressed');
+        c.send(TOUCH, touch(1, 800, 300)); c.send(TOUCH, touch(3, 800, 300)); await sleep(30);
+        assert.strictEqual(wakes, 4, 'a touch down and up');
+        t.d.scrollPage(10); t.d.pointerMove(1, 1);
+        assert.strictEqual(wakes, 6, 'ctx.scroll and ctx.pointer (the touchpad)');
+    } finally { t.end(); }
+});
+
 test('a sheet\'s press, back and touch target that throw: logged, the app runs on', async () => {
     const t = await setup(), c = t.c;
     try {

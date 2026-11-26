@@ -26,7 +26,11 @@ public:
     ~Mgvf() { close(); }
     /* Creates (or replaces) path for w x h frames, BT.709 limited range, all
      * slots black, seq 0. *warn gets a non-fatal note (fchown refused). */
-    bool open(const char *path, uint32_t w, uint32_t h, int nslot, std::string *err, std::string *warn);
+    bool open(const char *path, uint32_t w, uint32_t h, int nslot, std::string *err, std::string *warn,
+              uint32_t seq = 0);
+    /* The same file again for w x h frames (truncated and re-extended, the
+     * same inode), seq carried on so the renderer reads no black slot. */
+    bool resize(uint32_t w, uint32_t h, std::string *err);
     /* Y plane of the next slot; U = Y + w*h, V = U + w*h/4. */
     uint8_t *begin();
     void commit();
@@ -40,6 +44,8 @@ private:
     MgvfHead *head_ = nullptr;
     size_t len_ = 0;
     uint32_t w_ = 0, h_ = 0;
+    std::string path_;
+    int nslot_ = 0;
 };
 
 /* w x h NV12 (Y, then UV interleaved; both planes `pitch` bytes a row) to

@@ -32,7 +32,7 @@ Nothing is copied from the unit: the binary links the unit's
 ## Interface
 
 ```
-ytdec --dir <folder> --rect <W>x<H> [--fill] [--log <file>]
+ytdec --dir <folder> --rect <W>x<H> [--fill] [--no-upscale] [--log <file>]
 ```
 
 - `<folder>`: `index.bin` (MGYI) and `video.h264` (Annex-B), or
@@ -45,6 +45,15 @@ ytdec --dir <folder> --rect <W>x<H> [--fill] [--log <file>]
 - `--rect`: MGVF frame size, default 1280x720; even, 16..2048, `W*H*3` at most
   12 MiB. Fit (letterbox/pillarbox, black bars) by display aspect, filling instead when that crops at most 15 %; `--fill`
   crops the centre instead.
+- `--no-upscale`: the frame is the picture alone, no bars, at most at the
+  source's resolution (rows): a 854x480 video fitted into 1920x720 is a
+  854x480 frame, filled it is the 854x320 centre band; a 1080p one is scaled
+  down to 1280x720. The picture keeps the aspect it had in the rect (nearest
+  even width), so the renderer's op 19, which fits the frame into the rect the
+  app gives it, puts it where the bars did (within 1 px on the full layout)
+  when the app draws into the rect's aspect (RideTube 0.6.6, `vbox`).
+  The MGVF file is opened at `--rect` and resized to the first frame, and again
+  whenever the decoder's frame size changes (`src/fit.h`, `test_fit`).
 - `--log`: log file (appended); stderr otherwise.
 
 stdin, one command a line (EOF = quit):
@@ -52,9 +61,9 @@ stdin, one command a line (EOF = quit):
 | Command | Effect |
 |---|---|
 | `clock <elapsed_ms> <mono_ms>` | media position `elapsed_ms` was true at CLOCK_MONOTONIC `mono_ms`; pos = elapsed + (now − mono) |
-| `pause` / `resume` | freeze pos / re-anchor it at now |
+| `pause` / `resume` | freeze pos / re-anchor it at now; after 60 s of pause the decoder session closes, and `resume` then seeks to the paused pos first (below) |
 | `seek <ms>` | restart at the last keyframe ≤ ms whose access unit has an SPS, decode without VPP up to ms; shows the target frame at once (also while paused or before any clock); re-anchors the clock to ms until the next `clock` |
-| `video 0` / `video 1` | stop decoding and writing (the clock still runs) / seek to the current pos and go on |
+| `video 0` / `video 1` | stop decoding and writing and close the decoder session (the clock still runs) / seek to the current pos and go on |
 | `quit` | exit 0 |
 
 Before the first `clock` (and while paused) ytdec shows one frame (the first,
@@ -62,10 +71,18 @@ or the seek target) and holds. A frame is shown when pts ≤ pos + 8 ms, dropped
 when more than 2 frame durations late; frames certain to be late are decoded
 without VPP.
 
+Idle: an open MSDK session costs ~4 % of a core with nothing to decode (one
+worker thread waking ~855 times/s, car, 2026-11-24). So after 60 s of `pause`,
+on `video 0`, and at `eof` (its own flush), ytdec ends the session but stays up:
+the MGVF file keeps its last frame on screen, and stdin and the stats stay as
+they were. `resume` after an idle close seeks to the paused pos (a new session
+from the keyframe before it, up to one GOP decoded unseen: ~0.3-1 s); `seek` and
+`video 1` seek anyway. No command or event changed.
+
 stdout, JSON lines:
 
 ```
-{"ev":"ready","w":1280,"h":720,"fps":30.000,"src_w":1280,"src_h":720}     w,h = MGVF frame size
+{"ev":"ready","w":1280,"h":720,"fps":30.000,"src_w":1280,"src_h":720}     w,h = --rect (the MGVF size until the first frame)
 {"ev":"stats","decoded":N,"shown":N,"dropped":N,"late_ms":x,"cpu_pct":x,"fps":x,"pos_ms":N}   every 2 s
 {"ev":"eof"}
 {"ev":"error","msg":"..."}
@@ -101,7 +118,10 @@ it again on the rest.
 `/dev/shm/mgu-video-ridetube`: created with `O_NOFOLLOW`, 0600, `fchown` to
 `nobody` (a warning in the log when not root), 64-byte header + 3 slots,
 BT.709 limited range. The writer fills slot (slot+1)%3, then stores slot,
-then seq+1 (release). The file is left in place on exit (the app drops the
+then seq+1 (release). The frame size follows the decoder's frames (with
+`--no-upscale` they are smaller than `--rect`): the file is truncated and
+re-extended at the new size, seq carried on (a new header with seq 0 would
+make the renderer read a black slot), then the frame is written. The file is left in place on exit (the app drops the
 video). A restart truncates and re-extends the same inode: safe, mgu-render
 reads it with `pread` (gfx.c), never `mmap`, so a shrink cannot SIGBUS it.
 

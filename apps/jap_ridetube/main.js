@@ -149,6 +149,9 @@ mgu.run({
         model.autoDl = Number(settings.get('auto_download')) || 0;   // (0.6.0) new Subscriptions videos kept on the car, on Wi-Fi
         settings.onChange((key, value) => { if (key === 'ytdlp_auto') model.setYtdlpAuto(value !== false); proxySwitch(key, value); if (key === 'auto_download') model.setAutoDl(value); });
         let mode = 'home', browse = 'home', dirty = true;   // browse: the list the player goes back to
+        // the page's loop (ctx.loop, end of run): input that comes through signals, not the kit, kicks it
+        let viewLoop = null;
+        const kick = () => { if (viewLoop) viewLoop.kick(); };
         const changed = () => { dirty = true; if (ctx.background) ctx.background('playing', model.active()); labels(); };
         const isFeed = (m) => FEEDS.indexOf(m) >= 0;
         // a feed tab (or Playlists): signed in, (re)load it; signed out, ask for a sign-in code (the daemon says the one
@@ -297,13 +300,21 @@ mgu.run({
         /* ---------- playing ---------- */
         // the decoder's picture size. Full-screen layout: the whole screen, for the full view (ytdec fits, or
         // fills when that crops at most 15 %; the fill setting, on by default, always crops); the player draws the same frame
-        // smaller (op 19 fits it into its box). The daemon has no rect change, so the size is the full view's
+        // smaller (op 19 fits it into vbox, below). The daemon has no rect change, so the size is the full view's
         // from the start. Else the box in screen pixels.
         function rect() {
             const pl = ctx.display && ctx.display.place, s = (pl && pl.scale) || 1;
             const even = (v, max) => Math.min(max, Math.max(16, Math.round(v / 2) * 2));
             if (pl && pl.full) return even(pl.w, 2048) + 'x' + even(pl.h, 2048);
             return even(BOX.w * s, 1920) + 'x' + even(BOX.h * s, 720);
+        }
+        // where op 19 draws: x, y, w, h fitted to the aspect of the rect the video was played with (ytdec keeps it for the
+        // whole play, a layout change too). The service (0.5.6, noUpscale) sends the picture alone at the video's size, no
+        // bars, which the renderer fits in here: the place the bars put it (an older service's frame fills this exactly)
+        let playRect = null;
+        function vbox(x, y, w, h) {
+            const r = (playRect || rect()).split('x'), a = r[0] / r[1];
+            return w / h > a ? [x + (w - h * a) / 2, y, h * a, h] : [x, y + (h - w / a) / 2, w, w / a];
         }
         // it: the tile tapped (its title and channel show while the video is prepared)
         // list: the shelf, or the whole grid, it was picked from; the videos after it play next when one ends (autoplay)
@@ -323,7 +334,8 @@ mgu.run({
             }
             nextAt = 0;
             if (model.id === id && model.active()) return;
-            model.play(id, rect(), settings.get('fill') !== false, it, { quality: settings.get('quality'), skip: sbSkip() });
+            playRect = rect();
+            model.play(id, playRect, settings.get('fill') !== false, it, { quality: settings.get('quality'), skip: sbSkip(), noUpscale: true });
         }
         // the one playing, as a list item (what Previous and Next step over)
         const current = () => model.item(model.id) || { id: model.id, title: model.title, channel: model.channel };
@@ -561,6 +573,7 @@ mgu.run({
             const dir = ROCKER[raw] || null;
             if (dir === rocker) return;                           // the same again
             rocker = dir;
+            kick();
             const was = held;
             held = null;
             if (was) {                                            // let go (or turned the other way)
@@ -609,7 +622,7 @@ mgu.run({
             if (typeof cur !== 'number') return;
             if (volLogs < 20) { volLogs++; log.info('volume: sink ' + sink + ' ' + cur + (muted ? ' muted' : '') + ' (was ' + was + ')'); }
             vol = { v: cur, dir: typeof v === 'number' && typeof was === 'number' ? Math.sign(v - was) : 0, muted: !!muted, until: Date.now() + VOL_MS };
-            dirty = true;
+            dirty = true; kick();
         }
         Promise.resolve().then(() => ctx.signals.proxy('org.genivi.am.commandinterface.CommandControl', '1')).then((p) => {
             ctx.signals.call(p, 'getListMainSinks', {}).then((r) => {
@@ -674,7 +687,7 @@ mgu.run({
         }
         setInterval(() => { try { batteryGuard(); } catch (e) { log.error('battery', e); } }, 1000);
         let ovUntil = 0, qrUntil = 0, qrAt = 0;   // qrUntil: the On phone QR card shows until then; qrAt: the time it links to
-        function wake() { ovUntil = Date.now() + OVERLAY_MS; dirty = true; }
+        function wake() { ovUntil = Date.now() + OVERLAY_MS; dirty = true; kick(); }
         // the overlay's -10 s / +10 s (#18): a tap (finger or controller press) seeks 10 s; held SKIP_HOLD_MS the
         // button turns into previous / next video, and letting go takes it. skipHold: {dir, armed, t} while held
         let skipHold = null;
@@ -1304,7 +1317,7 @@ mgu.run({
         function drawPlayer(cv) {
             cv.fillRect(0, TOP, W, H - TOP, videoShown ? '#000000' : C.bg);
             if (videoShown) cv.fillRect(BOX.x, BOX.y, BOX.w, BOX.h, '#000000');
-            if (videoShown) cv.video(VID, BOX.x, BOX.y, BOX.w, BOX.h, 0);
+            if (videoShown) cv.video(VID, ...vbox(BOX.x, BOX.y, BOX.w, BOX.h), 0);
             const cx = BOX.x + BOX.w / 2, cy = BOX.y + BOX.h / 2 - 10, bot = BOX.y + BOX.h;
             // the title and channel over a scrim at the top
             if (model.title) {
@@ -1458,7 +1471,7 @@ mgu.run({
             seekBar = null;                                // (set again where this frame draws the bar)
             const pod = model.active() && noVideo();   // driving: podcast mode (no picture, big controls, always shown)
             picArea = pod ? null : { SW, s, ctls };        // double taps: the video player only (podcast mode has its big buttons)
-            if (videoShown && !pod) cv.video(VID, 0, 0, pl.w, pl.h, 0);
+            if (videoShown && !pod) cv.video(VID, ...vbox(0, 0, pl.w, pl.h), 0);
             if (!overlay() && !pod) {
                 cv.xf(); ovKeys().forEach((k) => tg(0, 0, SW, SH, wake, k, 0, k === 'ov:bar' ? turnSeek : undefined));
                 picArea.ctls = [];                         // (hidden: those keys only wake it, no control under a tap)
@@ -1689,7 +1702,7 @@ mgu.run({
             }
             return ui.image('VIEW_GFX', last);
         }
-        ctx.loop('VIEW', 10, render);
+        viewLoop = ctx.loop('VIEW', 10, render);
         // the Language setting changed (or, on Auto, the car's language): the new catalog, hello again with its lang and
         // region (feeds, search and related come in it), the page shown asks again, every text drawn or sent again
         function relang() {

@@ -1,5 +1,15 @@
 # Changelog
 
+## App 0.6.6 and service 0.5.7
+
+Video playback uses less of the car's processor, and when the car's player refuses the sound at the start, the service tries once more.
+
+- The video is no longer scaled up to the screen size before it is drawn. On phone data the stream is 854x480, and each frame used to be enlarged 2.25 times and padded with black bars on its way to the screen. Now the frame keeps the video's own size and the app draws it where the picture was. Measured parked on an 854x480 video, the decoder went from about 18.6 % to 15 % of a core, with no dropped frames.
+- After a minute of pause the video decoder closes its session. Before, it woke up hundreds of times a second with nothing to decode, which cost about 4 % of a core for the whole pause. The paused picture stays on screen.
+- A RideTube page that isn't changing is redrawn every 100 ms instead of every 16 ms. It goes back to full speed as soon as something moves or you touch the screen.
+- Some cars refuse the sound with an "ITEM_UNPLAYABLE" error just after a video starts, before any of it has played. The service now waits 2 seconds and gives the player the same file again. A second refusal, or one later in the video, still shows the error. We don't know the cause yet, so this may not help every time.
+- "Send logs" reports now name the audio stream the car got (format, codec, sample rate, channels) and the size of each file handed to the player, to help find that cause.
+
 ## App 0.6.4 and service 0.5.4
 
 Resuming a video now picks up where you last stopped, even if that was on another device.

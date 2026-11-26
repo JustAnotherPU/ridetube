@@ -158,6 +158,7 @@ function liveUi(hu, displayOf, softImage) {
         visible: async () => {}, enabled: async () => {}, checked: async () => {},
         onClick: (n, fn) => comp(n).on('action', (ev) => {
             log.info('click ' + n);
+            displayOf().wake();
             Promise.resolve().then(() => fn(ev || {})).catch((e) => log.error('click ' + n, e));
         }),
         // the HMI's own settings screen is not drawn here: the emulator's panel has the settings
@@ -191,51 +192,10 @@ function liveUi(hu, displayOf, softImage) {
     return ui;
 }
 
-/** mgu.js ctx.loop: once per renderer tick while the GPU renderer shows the screen, else about fps a second. */
-// (a copy: must match ctx.loop in kit/runtime/mgu.js runInner, minus its gc and timing details)
+/** mgu.js ctx.loop (kit/runtime/loop.js): once per renderer tick while the GPU renderer shows the screen, else about fps a second. */
 function liveLoop(hu) {
-    return (stateName, fps, fn) => {
-        const { ui, display, log } = hu;
-        let timer = null, on = false, running = false, frames = 0, spent = 0;
-        const gpuOn = () => display.active(stateName);
-        const tick = async () => {
-            timer = null;
-            if (!on || running) return;
-            running = true;
-            const t0 = Date.now();
-            try { await fn(); } catch (e) { log.error('loop ' + stateName, e); }
-            running = false;
-            const dt = Date.now() - t0;
-            frames++; spent += dt;
-            if (frames % (gpuOn() ? 600 : 100) === 0) {
-                log.info('loop ' + stateName + ': ' + (spent / (gpuOn() ? 600 : 100)).toFixed(1) + ' ms per frame in JS' + (gpuOn() ? ' (GPU renderer)' : ' (software, asked for ' + fps + ' fps)'));
-                spent = 0;
-            }
-            schedule(dt);
-        };
-        const schedule = (dt) => {
-            if (!on || timer !== null || running) return;
-            // the renderer ticks when it can take the next frame; 250 ms is the safety net if none comes
-            if (gpuOn()) timer = setTimeout(tick, display.gpu.waiting ? 250 : 16);
-            else timer = setTimeout(tick, Math.max(15, 1000 / fps - (dt || 0)));
-        };
-        display.onTick(() => {
-            if (!on || running) return;
-            if (timer !== null) { clearTimeout(timer); timer = null; }
-            if (gpuOn()) tick(); else schedule(0);
-        });
-        const set = (v) => {
-            on = v;
-            if (on && timer === null && !running) timer = setTimeout(tick, 0);
-            if (!on && timer !== null) { clearTimeout(timer); timer = null; }
-        };
-        ui.onVisible((name, v) => { if (name === stateName) set(v); });
-        if (ui.isVisible(stateName)) set(true);
-        return {
-            stop: () => set(false),
-            kick: () => { if (on && !running) { if (timer !== null) clearTimeout(timer); timer = setTimeout(tick, 0); } },
-        };
-    };
+    const { frameLoop } = require(path.join(hu.kitDir, 'loop'));
+    return (stateName, fps, fn) => frameLoop(hu.ui, hu.display, hu.log, stateName, fps, fn);
 }
 
 /**

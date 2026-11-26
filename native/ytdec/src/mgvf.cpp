@@ -10,7 +10,8 @@
 
 namespace ytdec {
 
-bool Mgvf::open(const char *path, uint32_t w, uint32_t h, int nslot, std::string *err, std::string *warn)
+bool Mgvf::open(const char *path, uint32_t w, uint32_t h, int nslot, std::string *err, std::string *warn,
+                uint32_t seq)
 {
     close();
     if (w % 2 || h % 2 || w < 16 || h < 16 || w > 2048 || h > 2048) {
@@ -58,6 +59,7 @@ bool Mgvf::open(const char *path, uint32_t w, uint32_t h, int nslot, std::string
     head_ = (MgvfHead *)p;
     len_ = len;
     w_ = w, h_ = h;
+    path_ = path, nslot_ = nslot;
     uint8_t *frames = (uint8_t *)p + sizeof(MgvfHead);
     for (int i = 0; i < nslot; i++) {
         uint8_t *f = frames + (size_t)i * frame_size();
@@ -66,12 +68,19 @@ bool Mgvf::open(const char *path, uint32_t w, uint32_t h, int nslot, std::string
     }
     MgvfHead hd;
     memset(&hd, 0, sizeof hd);
-    hd.version = 1, hd.w = w, hd.h = h, hd.nslot = (uint32_t)nslot;
+    hd.version = 1, hd.w = w, hd.h = h, hd.nslot = (uint32_t)nslot, hd.seq = seq;
     hd.matrix = 1;   /* BT.709 */
     hd.full = 0;     /* limited range */
     memcpy(head_, &hd, sizeof hd);
     __atomic_store_n(&head_->magic, kMgvfMagic, __ATOMIC_RELEASE);
     return true;
+}
+
+bool Mgvf::resize(uint32_t w, uint32_t h, std::string *err)
+{
+    const std::string path = path_;
+    std::string warn;
+    return open(path.c_str(), w, h, nslot_, err, &warn, seq());
 }
 
 uint8_t *Mgvf::begin()

@@ -658,6 +658,7 @@ async function appFrames() {
         await until(() => d.cmds('play').length > nPlay, 2000, 'Try again plays it again');
         assert.strictEqual(d.cmds('play').slice(-1)[0].id, 'aaa');
         assert.strictEqual(d.cmds('play').slice(-1)[0].quality, 'auto', 'the Video quality setting goes with each play');
+        assert.strictEqual(d.cmds('play').slice(-1)[0].noUpscale, true, 'frames at the video\'s own size (service 0.5.6 --no-upscale)');
         assert.deepStrictEqual(d.cmds('play').slice(-1)[0].skip, ['sponsor', 'selfpromo', 'interaction', 'intro'], 'and the SponsorBlock categories skipped');
         d.send({ ev: 'state', state: 'playing', id: 'aaa', title: 'Song' }); d.send({ ev: 'time', elapsed: 21000, total: 200000 });
         speedH({ speedVehicleCentreOfGravity: 0 });
@@ -782,6 +783,19 @@ async function appFrames() {
         disp.pageTargets.find((x) => /^s:\d+:f19$/.test(x.key)).run();
         await until(() => d.cmds('play').some((x) => x.id === 'f19' && x.fill === false && /^\d+x\d+$/.test(x.rect)), 2000, 'a feed tile plays its video');
         console.log('ok   feed scrolls (kit runs the screen) and a tile plays');
+        // the standard layout (its own player box) while that video plays: op 19 gets the box fitted to the play's
+        // 1920x720 rect, where the bars put the picture; the frame without bars (service 0.5.6) lands there too
+        const fr = d.cmds('play').slice(-1)[0].rect;
+        d.send({ ev: 'state', state: 'playing', pct: 100, id: 'f19', title: 'Feed 19' });
+        for (let i = 0; i < 10 && !frame().vrect; i++) { await sleep(300); await hu.loopFn(); }   // (sync: every 250 ms)
+        assert.ok(frame().vrect, 'the video drawn');
+        hu.ctx.settings.set('layout', 'standard'); disp._place(); await sleep(300); await hu.loopFn();
+        assert.strictEqual(disp.place.full, false);
+        const [rw, rh] = fr.split('x').map(Number), bw = 432 * rw / rh;
+        assert.deepStrictEqual(frame().vrect.map((v) => Math.round(v * 10) / 10), [12 + (1576 - bw) / 2, 38, bw, 432].map((v) => Math.round(v * 10) / 10),
+            'standard layout: op 19 in the ' + fr + ' rect\'s aspect inside the player box');
+        hu.ctx.settings.set('layout', 'full'); disp._place(); await hu.loopFn();
+        console.log('ok   op 19 in the play rect\'s aspect (' + fr + ') on the standard layout: ' + frame().vrect);
         d.send({ ev: 'state', state: 'idle' });
         hu.handlers.BTN_LIST();             // (back to the list)
     } else console.log('skip feed scrolling (the stub does not run the screen)');

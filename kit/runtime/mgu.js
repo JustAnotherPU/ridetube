@@ -23,6 +23,7 @@ const path = require('path');
 const { OnlineApp, logging } = require('oap-sdk');
 const themes = require('./themes');
 const { Display } = require('./display');
+const { frameLoop } = require('./loop');
 const { HmiText } = require('./hmi-text');
 const { listSheet } = require('./sheet');
 const { Life } = require('./life');
@@ -193,7 +194,7 @@ class Ui {
     /** Click handler; fn({ row, value }) */
     onClick(name, fn) {
         const c = this.comp(name);
-        if (c) c.on('action', (ev) => { log.info('click ' + name); Promise.resolve().then(() => fn(ev || {})).catch((e) => log.error('click ' + name, e)); });
+        if (c) c.on('action', (ev) => { log.info('click ' + name); if (this.display) this.display.wake(); Promise.resolve().then(() => fn(ev || {})).catch((e) => log.error('click ' + name, e)); });
     }
     open(stateName) { this._raise(stateName); return this._try('open ' + stateName, this.rhmi.openState(stateName)); }
     /**
@@ -622,57 +623,11 @@ async function runInner(impl) {
         canvas(w, h) { return display.canvas(w, h); },
         /**
          * Run fn while screen `stateName` is visible: once per screen refresh (up to 60 fps)
-         * when the GPU renderer shows it, else about `fps` times a second.
+         * when the GPU renderer shows it, else about `fps` times a second. A page unchanged for a while is
+         * looked at every 100 ms (loop.js): kick() the returned handle when data the page shows changes, or
+         * from fn each frame of an animation that must stay smooth.
          */
-        loop(stateName, fps, fn) {
-            let timer = null, on = false, running = false, frames = 0, spent = 0;
-            const gpuOn = () => display.active(stateName);
-            const tick = async () => {
-                timer = null;
-                if (!on || running) return;
-                running = true;
-                const t0 = Date.now();
-                try { await fn(); } catch (e) { log.error('loop ' + stateName, e); }
-                running = false;
-                const dt = Date.now() - t0;
-                frames++; spent += dt;
-                // software frames allocate image and PNG buffers; Node 8 frees them lazily, which lets
-                // memory float up to the platform's limit (the app is then killed). Collect regularly.
-                if (!gpuOn() && frames % 3 === 0 && typeof global.gc === 'function') { try { global.gc(); } catch (e) { /* ignore */ } }
-                if (frames % (gpuOn() ? 600 : 100) === 0) {
-                    const n = gpuOn() ? 600 : 100, tm = ui.timing, png = Math.round(tm.png / n), push = Math.round(tm.push / n), all = (spent / n).toFixed(1);
-                    log.info('loop ' + stateName + ': ' + all + ' ms per frame in JS' + (gpuOn() ? ' (GPU renderer)' : ' (draw ' + Math.max(0, all - png - push) + ', png ' + png + ', hmi ' + push + '; asked for ' + fps + ' fps)'));
-                    spent = 0; tm.png = 0; tm.push = 0;
-                }
-                schedule(dt);
-            };
-            const schedule = (dt) => {
-                if (!on || timer !== null || running) return;
-                if (gpuOn()) {
-                    // the renderer sends a tick when it can take the next frame; if this frame was
-                    // not sent (unchanged), look again shortly
-                    // (a tick normally follows a sent frame; 250 ms is the safety net if none comes)
-                    timer = setTimeout(tick, display.gpu.waiting ? 250 : 16);
-                } else timer = setTimeout(tick, Math.max(15, 1000 / fps - (dt || 0)));
-            };
-            display.onTick(() => {
-                // a tick from the renderer, or the renderer went away (then back to the timer)
-                if (!on || running) return;
-                if (timer !== null) { clearTimeout(timer); timer = null; }
-                if (gpuOn()) tick(); else schedule(0);
-            });
-            const set = (v) => {
-                on = v;
-                if (on && timer === null && !running) timer = setTimeout(tick, 0);
-                if (!on && timer !== null) { clearTimeout(timer); timer = null; }
-            };
-            ui.onVisible((name, v) => { if (name === stateName) set(v); });
-            if (ui.isVisible(stateName)) set(true);
-            return {
-                stop: () => set(false),
-                kick: () => { if (on && !running) { if (timer !== null) clearTimeout(timer); timer = setTimeout(tick, 0); } },
-            };
-        },
+        loop(stateName, fps, fn) { return frameLoop(ui, display, log, stateName, fps, fn); },
     };
 
     // visibility of our states (pauses rendering when the user leaves); the HMI's settings screen too (the

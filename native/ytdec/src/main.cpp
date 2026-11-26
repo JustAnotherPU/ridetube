@@ -1,10 +1,11 @@
 /* ytdec: the video half of RideTube.
  *
- *   ytdec --dir <folder> --rect <W>x<H> [--fill] [--log <file>]
+ *   ytdec --dir <folder> --rect <W>x<H> [--fill] [--no-upscale] [--log <file>]
  *
  * Reads <folder>/index.bin + video.h264 (yt/proxy), decodes on the GPU
  * (Intel Media SDK, decoder_msdk.cpp from waze-on-cluster), fits (or with
- * --fill crops) each picture into W x H (default 1280x720) and writes it to
+ * --fill crops) each picture into W x H (default 1280x720; --no-upscale: the
+ * picture alone, at most at the source's size, for the renderer to scale) and writes it to
  * /dev/shm/mgu-video-ridetube for mgu-render, paced by the audio clock from stdin.
  * stdin, one command a line: clock <elapsed_ms> <mono_ms> | pause | resume |
  * seek <ms> | video 0|1 | quit (EOF = quit). stdout: JSON lines, ready,
@@ -163,7 +164,7 @@ int run(int argc, char **argv)
 {
     std::string dir, logpath;
     unsigned w = 1280, h = 720;
-    bool fill = false;
+    bool fill = false, no_upscale = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--dir" && i + 1 < argc)
@@ -173,20 +174,22 @@ int run(int argc, char **argv)
                 return fail("--rect wants WxH", 2);
         } else if (a == "--fill")
             fill = true;
+        else if (a == "--no-upscale")
+            no_upscale = true;
         else if (a == "--log" && i + 1 < argc)
             logpath = argv[++i];
         else
-            return fail("usage: ytdec --dir <folder> --rect <W>x<H> [--fill] [--log <file>]", 2);
+            return fail("usage: ytdec --dir <folder> --rect <W>x<H> [--fill] [--no-upscale] [--log <file>]", 2);
     }
     if (dir.empty())
-        return fail("usage: ytdec --dir <folder> --rect <W>x<H> [--fill] [--log <file>]", 2);
+        return fail("usage: ytdec --dir <folder> --rect <W>x<H> [--fill] [--no-upscale] [--log <file>]", 2);
     if (!logpath.empty()) {
         int fd = open(logpath.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
         if (fd >= 0)
             g_log = fd;
     }
     log_line(std::string("ytdec ") + YTDEC_VERSION + " dir=" + dir + " rect=" + std::to_string(w) + "x" +
-             std::to_string(h) + (fill ? " fill" : " fit"));
+             std::to_string(h) + (fill ? " fill" : " fit") + (no_upscale ? " no-upscale" : ""));
 
     ytdec::Mgvf out;
     std::string err, warn;
@@ -196,7 +199,7 @@ int run(int argc, char **argv)
         log_line(warn);
 
     MsdkDecoder dec;
-    if (!dec.d.init("/dev/dri/renderD128", w, h, fill, &err))
+    if (!dec.d.init("/dev/dri/renderD128", w, h, fill, no_upscale, &err))
         return fail("decoder: " + err, 1);
 
     ytdec::Player player(dir, &dec, &out, emit, log_line, cpu_pct);

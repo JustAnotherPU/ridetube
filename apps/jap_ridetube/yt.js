@@ -3,7 +3,7 @@
  * yt.js - RideTube's link to the car daemon jap-ridetube-d (ytd.js) and its playback state.
  *
  *   Ctl    the control socket /run/jap-ridetube-d/ctl.sock: JSON lines, reconnects every 2 s.
- *          App -> daemon: search{q} thumb{id} play{id,rect:"WxH",fill} pause resume seek{ms} stop quality{quality} fill{on} video{on} status
+ *          App -> daemon: search{q} thumb{id} play{id,rect:"WxH",fill,noUpscale} pause resume seek{ms} stop quality{quality} fill{on} video{on} status
  *                         auth_status auth sign_out feed{which:home|subs|wl|hist} channels channel{id} playlists playlist{id}
  *                         send_logs{app}: the service's recent log, redacted, to the developer
  *                         hello{app,lang,region?}: on connect, after the rest; the service's caps come back
@@ -363,7 +363,7 @@ class Model {
         return false;
     }
     /** it: the tile tapped ({title, channel}), else the lists' item: shown until the daemon says its own title */
-    /** o: { quality, skip } (the settings), sent as they are */
+    /** o: { quality, skip, noUpscale } (the settings; noUpscale: frames at the video's size), sent as they are */
     play(id, rect, fill, it, o) {
         const r = it || this.item(id);
         this.id = id; this.title = r ? String(r.title || '') : ''; this.channel = r ? String(r.channel || '') : ''; this.state = 'preparing'; this.pct = 0; this.elapsed = 0; this.total = 0; this.error = null; this.retry = 0;

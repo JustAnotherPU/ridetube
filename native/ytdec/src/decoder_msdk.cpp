@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Robert Nisipeanu
-// Modified 2026-11 by JustAnotherPU for RideTube (GPL-3.0 section 5(a)): frames in display order with their timestamps, VPP fit/fill into the output size, NV12 planes out, VP9 through the unit's MSDK VP9 plugin.
+// Modified 2026-11 by JustAnotherPU for RideTube (GPL-3.0 section 5(a)): frames in display order with their timestamps, VPP fit/fill into the output size (or the picture alone at most at source size), NV12 planes out, VP9 through the unit's MSDK VP9 plugin.
 // From github.com/robertnisipeanu/idrive-apps, native/waze-on-cluster/src/decoder_msdk.cpp.
 #include "decoder_msdk.h"
+#include "fit.h"
 #include "nal_reader.h"
 
 #include "mfx/mfxplugin.h"
@@ -83,7 +84,6 @@ std::string mfx_error(const char *call, mfxStatus s)
 }
 
 mfxU16 align16(uint32_t v) { return (mfxU16)((v + 15) & ~15u); }
-mfxU16 even(double v) { return (mfxU16)((uint32_t)(v + 0.5) & ~1u); }
 
 const mfxU64 kNoTimeStamp = (mfxU64)-1;   /* MFX_TIMESTAMP_UNKNOWN */
 
@@ -115,6 +115,7 @@ struct Decoder::State {
     mfxSession session = nullptr;
     uint32_t out_w = 0, out_h = 0;   /* requested; 0 = the stream's size */
     bool fill = false;               /* crop to fill out_w x out_h instead of fitting inside */
+    bool no_upscale = false;         /* the picture alone, at most the source size (fit.h) */
     int64_t pts_ms = -1;             /* timestamp of the access units of this feed() */
 
     NalReader nal;
@@ -300,8 +301,10 @@ bool Decoder::State::start(const AccessUnit &au)
     dec.mfx.DecodedOrder = 0;
 
     const mfxFrameInfo &in = dec.mfx.FrameInfo;
-    w = out_w ? out_w : in.CropW;
-    h = out_h ? out_h : in.CropH;
+    const Fit g = fit_frame(in.CropX, in.CropY, in.CropW, in.CropH, in.AspectRatioW, in.AspectRatioH, out_w, out_h,
+                            fill, no_upscale);
+    w = g.w;
+    h = g.h;
 
     memset(&vpp, 0, sizeof vpp);
     vpp.AsyncDepth = 1;
@@ -314,36 +317,11 @@ bool Decoder::State::start(const AccessUnit &au)
     out.PicStruct = MFX_PICSTRUCT_PROGRESSIVE;
     out.Width = align16(w);
     out.Height = align16(h);
-    out.CropX = out.CropY = 0;
-    out.CropW = (mfxU16)w;
-    out.CropH = (mfxU16)h;
-    /* Fit or fill by display aspect (sample aspect ratio included, 0 = square). */
-    crop_x = in.CropX, crop_y = in.CropY, crop_w = in.CropW, crop_h = in.CropH;
-    if (out_w && in.CropW && in.CropH) {
-        const double sar = in.AspectRatioW && in.AspectRatioH ? (double)in.AspectRatioW / in.AspectRatioH : 1.0;
-        const double src = (double)in.CropW * sar / in.CropH, dst = (double)w / h;
-        /* fit fills too when that crops at most 15 %: a 2.35:1 film on the 8:3 screen, not a 16:9 one */
-        if (fill || (src > dst ? dst / src : src / dst) >= 0.85) {
-            if (src > dst) {
-                crop_w = even(in.CropW * dst / src);
-                crop_x = (mfxU16)(in.CropX + ((in.CropW - crop_w) / 2 & ~1u));
-            } else {
-                crop_h = even(in.CropH * src / dst);
-                crop_y = (mfxU16)(in.CropY + ((in.CropH - crop_h) / 2 & ~1u));
-            }
-        } else {
-            if (src > dst)
-                out.CropH = even(w / src);
-            else
-                out.CropW = even(h * src);
-            if (out.CropW < 2) out.CropW = 2;
-            if (out.CropH < 2) out.CropH = 2;
-            out.CropX = (mfxU16)((w - out.CropW) / 2 & ~1u);
-            out.CropY = (mfxU16)((h - out.CropH) / 2 & ~1u);
-        }
-        vpp.vpp.In.CropX = crop_x, vpp.vpp.In.CropY = crop_y;
-        vpp.vpp.In.CropW = crop_w, vpp.vpp.In.CropH = crop_h;
-    }
+    /* fit/fill by display aspect, fit.h */
+    out.CropX = g.pic_x, out.CropY = g.pic_y, out.CropW = g.pic_w, out.CropH = g.pic_h;
+    crop_x = g.src_x, crop_y = g.src_y, crop_w = g.src_w, crop_h = g.src_h;
+    vpp.vpp.In.CropX = crop_x, vpp.vpp.In.CropY = crop_y;
+    vpp.vpp.In.CropW = crop_w, vpp.vpp.In.CropH = crop_h;
     /* VPP needs a frame rate; the same one in and out means no frame rate
      * conversion. A stream without VUI timing gives none. */
     if (!in.FrameRateExtN || !in.FrameRateExtD) {
@@ -541,7 +519,7 @@ Decoder::Decoder() {}
 
 Decoder::~Decoder() { shutdown(); }
 
-bool Decoder::init(const char *dev, uint32_t out_w, uint32_t out_h, bool fill, std::string *err)
+bool Decoder::init(const char *dev, uint32_t out_w, uint32_t out_h, bool fill, bool no_upscale, std::string *err)
 {
     shutdown();
     if ((out_w == 0) != (out_h == 0)) {
@@ -556,6 +534,7 @@ bool Decoder::init(const char *dev, uint32_t out_w, uint32_t out_h, bool fill, s
     s->out_w = out_w;
     s->out_h = out_h;
     s->fill = fill;
+    s->no_upscale = no_upscale;
 
     s->fd = open(dev, O_RDWR | O_CLOEXEC);
     if (s->fd < 0) {
