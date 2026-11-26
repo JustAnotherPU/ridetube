@@ -147,7 +147,7 @@ class Model {
         this.rev = 0;                // bumped on every change the screens show
     }
     active() { return ACTIVE.indexOf(this.state) >= 0; }
-    /** the service answers this (hello's caps: health, related, hist, ytdlp, remote, proxy, stream) */
+    /** the service answers this (hello's caps: health, related, hist, ytdlp, remote, proxy, stream, download, loop) */
     can(cap) { return this.caps.indexOf(cap) >= 0; }
     _changed() { this.rev++; }
 
@@ -372,6 +372,9 @@ class Model {
         // the account's own resume point (the tile's), used by the daemon when this car never played it
         return this.send(Object.assign({ cmd: 'play', id, rect, fill: !!fill }, r && r.start_s > 0 ? { at: r.start_s * 1000 } : {}, o || {}));
     }
+    /** Repeat: the service plays the video again from 0 at its end, nothing fetched again but a stream's video window
+     *  (cap loop, 0.5.8; it holds for this connection: said again on each hello). False: an older service */
+    loop(on) { return this.can('loop') ? this.send({ cmd: 'loop', on: !!on }) : false; }
     toggle() {
         if (this.state === 'playing') return this.send({ cmd: 'pause' });
         if (this.state === 'paused') return this.send({ cmd: 'resume' });

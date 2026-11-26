@@ -248,5 +248,9 @@
   "Signed out, Home shows Continue watching and your downloads": "Sem login, o Início mostra Retomar e seus downloads",
   "Settings can download your newest Subscriptions videos, on Wi-Fi only": "Os Ajustes podem baixar os vídeos mais novos das Inscrições, só no Wi-Fi",
   "More videos play: VP9 is used when YouTube offers it": "Mais vídeos tocam: o VP9 é usado quando o YouTube oferece",
-  "Pausing in the first minute now stops the sound too": "Pausar no primeiro minuto agora também para o som"
+  "Pausing in the first minute now stops the sound too": "Pausar no primeiro minuto agora também para o som",
+  "Repeat": "Repetir",
+  "Repeat on": "Repetir: sim",
+  "Repeat off": "Repetir: não",
+  "Repeat: play the video again when it ends": "Repetir: reproduzir o vídeo de novo quando acabar"
 }

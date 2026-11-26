@@ -177,6 +177,7 @@ App → daemon (every `case` of `onLine` in `ytd.js`, no more, no fewer: `test_y
 | `{"cmd":"pause"}` / `{"cmd":"resume"}` | `sendButtonEvent PAUSE/PLAY` + ytdec `pause`/`resume` |
 | `{"cmd":"seek","ms":N}` | absolute; `setTime` + ytdec `seek N` |
 | `{"cmd":"video","on":bool}` | ytdec `video 1/0` (audio unaffected) |
+| `{"cmd":"loop","on":bool}` | (0.5.5, cap `loop`) the app's Repeat, for this connection (a client replacing another mid-video keeps it for that video until it says `loop` again): at the audio's end the video plays again from 0 instead of `ended` (state stays `playing`, `time` goes back to 0). Nothing is fetched again but a stream's video window from 0: the lookup and the audio stay, and the car's audio connection is made again as a resume does |
 | `{"cmd":"fill","on":bool}` | zoom while playing: ytdec again at the clock with `--fill` or without; the sound plays on; the same mode: nothing |
 | `{"cmd":"quality","quality":q}` | while playing, at another height (as `play`): the video fetched again from where it is (in the first 10 s too), paused if it was; the same height: nothing. A pause, resume, seek, stop or play sent during that restart is applied or cancels it |
 | `{"cmd":"stop"}` | STOP, disconnect, ytdec `quit` (SIGKILL after 1 s) |

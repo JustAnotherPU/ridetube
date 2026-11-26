@@ -248,5 +248,9 @@
   "Signed out, Home shows Continue watching and your downloads": "Без входа «Главная» показывает «Продолжить просмотр» и ваши загрузки",
   "Settings can download your newest Subscriptions videos, on Wi-Fi only": "В настройках можно скачивать новые видео из подписок, только по Wi-Fi",
   "More videos play: VP9 is used when YouTube offers it": "Воспроизводится больше видео: VP9 используется, когда YouTube его предлагает",
-  "Pausing in the first minute now stops the sound too": "Пауза в первую минуту теперь выключает и звук"
+  "Pausing in the first minute now stops the sound too": "Пауза в первую минуту теперь выключает и звук",
+  "Repeat": "Повтор",
+  "Repeat on": "Повтор: вкл",
+  "Repeat off": "Повтор: выкл",
+  "Repeat: play the video again when it ends": "Повтор: воспроизводить видео заново после окончания"
 }

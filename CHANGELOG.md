@@ -1,11 +1,19 @@
 # Changelog
 
-## Unreleased
+## App 0.6.7 and service 0.5.8
 
+Repeat for a music video on repeat, and RideTube in Korean.
+
+- Repeat is in the player's overlay (middle left, beside Close), in the podcast view's header while driving, and in the menu (Repeat on / off). It is also a setting and stays on until you switch it off.
+- With Repeat on, the service plays the video again from 0:00 when it reaches the end, instead of ending it. There is no "Preparing", no Up next, and no new YouTube lookup. The audio, already complete on the car, plays again from the start. Of the video, only its first minutes are fetched again, because the car keeps just a window of it in memory. A downloaded video loops with nothing fetched at all.
+- Repeat needs the updated service, which adds a `loop` command. With an older service the control doesn't show.
+- Fixed in the service: a stop that came while a resumed (or looped) video was restarting the car's player left a wait behind. The next video's first time update then went to that wait, so the video skipped its resume point.
+- Translated into all the app's languages.
 - Korean: the menus, the settings, the car's own menu for RideTube on a Korean head unit and the phone remote page
   come in Korean (Language setting: 한국어; Auto picks it when iDrive is set to Korean). Korean text, video titles
   included, draws from a new Hangul atlas (`kit/localization/fonts/korean.json`, Noto Sans CJK KR, the 2,350 KS X
   1001 syllables), which `kit/tools/bake_korean.py` rebakes.
+- A test of the service waited for the decoder's log line before reading it, so it no longer fails on a busy computer.
 
 ## App 0.6.6 and service 0.5.7
 

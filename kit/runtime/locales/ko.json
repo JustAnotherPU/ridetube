@@ -249,5 +249,9 @@
   "Signed out, Home shows Continue watching and your downloads": "로그아웃 상태에서는 홈에 이어서 보기와 다운로드한 동영상이 나옵니다",
   "Settings can download your newest Subscriptions videos, on Wi-Fi only": "설정에서 구독의 최신 동영상을 Wi-Fi에서만 다운로드할 수 있습니다",
   "More videos play: VP9 is used when YouTube offers it": "더 많은 동영상이 재생됩니다: YouTube가 VP9을 주면 VP9을 씁니다",
-  "Pausing in the first minute now stops the sound too": "처음 1분 안에 일시정지하면 이제 소리도 멈춥니다"
+  "Pausing in the first minute now stops the sound too": "처음 1분 안에 일시정지하면 이제 소리도 멈춥니다",
+  "Repeat": "반복 재생",
+  "Repeat on": "반복 재생: 켜짐",
+  "Repeat off": "반복 재생: 꺼짐",
+  "Repeat: play the video again when it ends": "반복 재생: 동영상이 끝나면 다시 재생"
 }

@@ -280,5 +280,9 @@
   "Signed out, Home shows Continue watching and your downloads": "未登录时，首页显示继续观看和已下载的视频",
   "Settings can download your newest Subscriptions videos, on Wi-Fi only": "设置中可自动下载订阅的最新视频，仅在 Wi-Fi 下",
   "More videos play: VP9 is used when YouTube offers it": "更多视频可以播放：YouTube 提供 VP9 时会使用 VP9",
-  "Pausing in the first minute now stops the sound too": "播放第一分钟内暂停时，声音也会停止"
+  "Pausing in the first minute now stops the sound too": "播放第一分钟内暂停时，声音也会停止",
+  "Repeat": "重复播放",
+  "Repeat on": "重复播放：开",
+  "Repeat off": "重复播放：关",
+  "Repeat: play the video again when it ends": "重复播放：视频结束后从头再次播放"
 }

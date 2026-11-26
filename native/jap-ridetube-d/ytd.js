@@ -32,7 +32,7 @@ const VERSION = '0.5.7';   // component.json's (test_ytd.js checks): sent with a
 const BUILT = '2026-11-21';
 // what `hello` says this build answers for real. The frozen names: health, related, hist (feed hist|liked), ytdlp,
 // remote, proxy, stream, download (library, download, remove, auto_download). A package adds its name here (through the integrator) once its command works
-const CAPS = ['related', 'hist', 'health', 'remote', 'ytdlp', 'download', 'proxy'];
+const CAPS = ['related', 'hist', 'health', 'remote', 'ytdlp', 'download', 'proxy', 'loop'];
 const LANG_RE = /^[a-z]{2}$/, REGION_RE = /^[A-Z]{2}$/;   // hello's lang ("ru") and region ("RU")
 // the log relay (send_logs posts <REPORT_URL>/v1/report): the only place reports go. MGU_YT_REPORT_URL or opts.reportUrl override it
 const REPORT_URL = 'https://ridetube-logs.ridetube-relay.workers.dev';
@@ -1389,6 +1389,7 @@ function Daemon(o) {
     this.elapsed = 0;
     this.total = 0;
     this.stoppedAt = null;
+    this.loop = false;     // `loop` (the app's Repeat): at the audio's end the video plays again from 0 (loopAgain), no `ended`
     this.lastTimeEv = 0;
     this.sawPlay = false;
     this.ticking = false;
@@ -1979,6 +1980,9 @@ Daemon.prototype.onClient = function (c) {
     }
     this.client = c;
     this.hl = this.gl = null;   // hello's lang and region hold for this connection only
+    // so does `loop`: the app says it again after hello. A client replacing another mid-video carries it over until
+    // then ('carried'), so the video does not end in between; a carried loop ends with that video (stop)
+    this.loop = this.loop && this.cur ? 'carried' : false;
     this.clockSaid = undefined; // what hello (then `clock`) told this connection about the clock; undefined: no hello yet
     c.setEncoding('utf8');
     let buf = '';
@@ -2025,6 +2029,7 @@ Daemon.prototype.onLine = function (line) {
     case 'stop': return this.stop('idle');
     case 'video': return this.setVideo(!!m.on);
     case 'fill': return this.setFill(!!m.on);
+    case 'loop': this.loop = !!m.on; this.log('loop ' + (this.loop ? 'on' : 'off')); return undefined;
     case 'quality': return this.requality(m.quality);
     case 'auth': return this.account.start();
     case 'auth_status': return this.emit(this.account.status());
@@ -2996,6 +3001,10 @@ Daemon.prototype.stop = async function (reason) {
         if (this.cur && this.cur.track) this.ping(this.cur, true, !!(p && p.done));
     }
     const g = ++this.gen;
+    if (reason && this.loop === 'carried') this.loop = false;   // a loop carried over a reconnect: that video's only
+    // a replay still waiting for its file's first tick (a resume, a loop) ends here: left waiting, the next play's first
+    // tick (the one that takes it to its resume point) would only wake it
+    if (this.tickWaiter) { const w = this.tickWaiter; this.tickWaiter = null; w(); }
     this.ticking = false;
     this.killYtdec();
     await Promise.all([this.audio.release(), this.stopFetch()]);
@@ -3138,6 +3147,28 @@ Daemon.prototype.replayFile = async function (why, me) {
     this.lastTickAt = Date.now(); // the clock extrapolates from here, not from before the stop
     await this.audio.seek(at);
 };
+// `loop` on, the audio at its end: the same video again from 0 with nothing torn down. The player stopped at the file's
+// end, so this is a stop mid-file held at 0 (seek keeps stoppedAt) and started again there (replayAt: a new connection,
+// as resume does); no `paused` or `ended` said. The lookup and audio.m4a stay; a stream's window is fetched again from 0
+// (seek's restream: the video only), a whole video (a download) is just sought. ytdec stays up after its eof (a seek
+// plays again). SponsorBlock skips again. False (not looped): not playing the full audio yet, or a start under way.
+Daemon.prototype.loopAgain = function () {
+    const c = this.cur;
+    if (!c || this.state !== 'playing' || this.head || !this.fullReady || this.restart) return false;
+    this.log('loop ' + c.id + ': again from 0');
+    // the pass watched to its end: kept (done) and told to the History before the clock goes back; the next watchtime
+    // range starts at 0 (left at the end, it would run backwards: st past et)
+    this.savePos(true);
+    if (c.track) { this.ping(c, true); c.track.st = 0; }
+    (c.segs || []).forEach((x) => { x.done = false; });
+    this.stoppedAt = this.elapsed;   // (held: seek moves it to 0 and leaves the stopped player alone)
+    this.heldAt = null;
+    this.eof = false;
+    this.seek(0).catch((e) => this.log('loop seek: ' + e));
+    this.emit({ ev: 'time', elapsed: 0, total: this.total });
+    this.replayAt('loop').catch((e) => this.log('loop: ' + e));
+    return true;
+};
 Daemon.prototype.seek = async function (ms) {
     ms = Math.max(0, Math.floor(Number(ms) || 0));
     if (this.restart) { this.restart.ms = ms; this.restart.sought = true; } // the start under way ends there, not where it was left
@@ -3268,6 +3299,7 @@ Daemon.prototype.onPlayerState = function (v) {
     if (v === 'PLAYER_STATE_STOP' && this.sawPlay) {
         this.sawPlay = false;
         if (!this.total || this.total - this.elapsed < 4000) {
+            if (this.loop && this.loopAgain()) return;
             this.log('audio ended');
             this.stop('ended').catch((e) => this.log('stop: ' + e));
             return;
