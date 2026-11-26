@@ -90,6 +90,11 @@
         ],
         [
           "button",
+          "BTN_REPEAT",
+          "Repeat off"
+        ],
+        [
+          "button",
           "BTN_RESULTS",
           "Results"
         ],
@@ -260,6 +265,12 @@
           "360p (least data)"
         ]
       ]
+    },
+    {
+      "key": "repeat",
+      "label": "Repeat: play the video again when it ends",
+      "type": "bool",
+      "default": false
     },
     {
       "key": "video_driving",

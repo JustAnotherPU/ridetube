@@ -181,6 +181,7 @@ mgu.run({
         ctl.on('down', () => { model.setConnected(false); if (remote) remote.down(); changed(); });
         ctl.on('msg', (m) => {
             model.onMsg(m);
+            if (m.ev === 'hello') model.loop(repeatOn());   // Repeat holds per connection on the service: said again on each hello
             if (remote) remote.onMsg(m);
             if (m.ev === 'error') log.warn('jap-ridetube-d: ' + m.msg);
             if (m.ev === 'state') log.info('jap-ridetube-d: ' + m.state + (m.id ? ' ' + m.id : ''));
@@ -380,6 +381,19 @@ mgu.run({
             model.stop();
             goBack(browse);
         }
+        /* ---------- Repeat (a setting, toggled in the player and the menu): the service loops the video ---------- */
+        // at the video's end it plays again from 0 with nothing torn down: no `ended`, no Up next, no new lookup or audio
+        // fetch, only a stream's video window from 0 (service 0.5.5, cap loop; an older one: no Repeat shown)
+        const repeatOn = () => settings.get('repeat') === true;
+        const canRepeat = () => model.can('loop');
+        function toggleRepeat() { settings.set('repeat', !repeatOn()); model.loop(repeatOn()); dirty = true; labels(); }
+        // two arrows chasing round: the Repeat control's glyph (k: its size)
+        const repeatGlyph = (cv, x, y, c, k) => {
+            k = k || 1;
+            cv.strokeRoundRect(x - 20 * k, y - 12 * k, 40 * k, 24 * k, 9 * k, Math.max(2, 3.5 * k), c);
+            cv.quad([[x + 2 * k, y - 20 * k], [x + 12 * k, y - 12 * k], [x + 2 * k, y - 4 * k], [x + 2 * k, y - 20 * k]], c);
+            cv.quad([[x - 2 * k, y + 4 * k], [x - 12 * k, y + 12 * k], [x - 2 * k, y + 20 * k], [x - 2 * k, y + 4 * k]], c);
+        };
         // an X: the Close control's glyph
         const xGlyph = (cv, x, y, r, c) => { cv.line(x - r, y - r, x + r, y + r, 6, c); cv.line(x - r, y + r, x + r, y - r, 6, c); };
         // from render: ended with a next one -> 5 s to see what comes, then it plays (back to the list cancels)
@@ -392,18 +406,21 @@ mgu.run({
             skipNext(false, true);
             return null;
         }
-        let lastPlay = null, lastList = null, lastAcct = null, lastCaps = null;
+        let lastPlay = null, lastList = null, lastAcct = null, lastCaps = null, lastRepeat = null;
         function labels() {
-            const caps = [model.can('hist'), model.can('health'), model.can('remote'), model.can('download')];
-            if (String(caps) !== lastCaps && ui.visible) { lastCaps = String(caps); ui.visible('BTN_HIST', caps[0]); ui.visible('BTN_HEALTH', caps[1]); ui.visible('BTN_REMOTE', caps[2]); ui.visible('BTN_LIB', caps[3]); }
+            const caps = [model.can('hist'), model.can('health'), model.can('remote'), model.can('download'), canRepeat()];
+            if (String(caps) !== lastCaps && ui.visible) { lastCaps = String(caps); ui.visible('BTN_HIST', caps[0]); ui.visible('BTN_HEALTH', caps[1]); ui.visible('BTN_REMOTE', caps[2]); ui.visible('BTN_LIB', caps[3]); ui.visible('BTN_REPEAT', caps[4]); }
             const p = model.state === 'playing' ? 'Pause' : 'Play';
             if (p !== lastPlay) { lastPlay = p; ui.text('BTN_PLAY', translate(p)); }
+            const rp = repeatOn() ? 'Repeat on' : 'Repeat off';
+            if (rp !== lastRepeat) { lastRepeat = rp; ui.text('BTN_REPEAT', translate(rp)); }
             const l = mode === 'player' ? NAMES[browse] : model.active() ? 'Now playing' : 'Player';
             if (l !== lastList) { lastList = l; ui.text('BTN_LIST', translate(l)); }
             const a = model.auth.state !== 'signed_in' ? 'Sign in' : signOutArmed ? 'Press again to sign out' : 'Sign out';
             if (a !== lastAcct) { lastAcct = a; ui.text('BTN_ACCOUNT', translate(a)); }
         }
         ui.onClick('BTN_PLAY', () => model.toggle());
+        ui.onClick('BTN_REPEAT', toggleRepeat);
         ui.onClick('BTN_RW', () => model.skip(-10000));
         ui.onClick('BTN_FF', () => model.skip(10000));
         ui.onClick('BTN_LIST', () => show(mode === 'player' ? browse : 'player'));
@@ -1350,8 +1367,11 @@ mgu.run({
          * the page's px (dx, dy). Hidden, the same keys cover the whole screen and only show it again (the
          * controller stays on its key, so a turn or a press wakes it; a tap anywhere too).
          */
-        const OVK = ['ov:back', 'ov:qr', 'ov:close', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'];
-        const ovKeys = () => (model.can('download') && model.id ? OVK.slice(0, 2).concat('ov:dl', OVK.slice(2)) : OVK);
+        const OVK = ['ov:back', 'ov:qr', 'ov:close', 'ov:repeat', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'];
+        const ovKeys = () => {
+            const k = canRepeat() ? OVK : OVK.filter((x) => x !== 'ov:repeat');
+            return model.can('download') && model.id ? k.slice(0, 2).concat('ov:dl', k.slice(2)) : k;
+        };
         // a play failed with no internet while downloads are on the car: where they are
         const offlineHint = () => (model.state === 'error' && model.errorOffline && model.downloaded().length ? translate('Downloaded videos still play - Library') : null);
         // podcast mode (driving): artwork, title, chapter, the bar with chapter ticks and skipped segments, controls
@@ -1363,6 +1383,14 @@ mgu.run({
             const chip = translate('Podcast mode · driving'), cw = cv.textWidth(chip, 22, LIT) + 40;
             cv.roundRect(x0 + 170, top, cw, 40, 20, C.ph);
             cv.text(chip, x0 + 170 + cw / 2, top + 28, 22, C.dim, { literal: true, align: 'center' });
+            // Repeat: a pill after the chip (pink while on), its target larger than it
+            if (canRepeat()) {
+                const rp = repeatOn(), rt = translate(rp ? 'Repeat on' : 'Repeat off'), rw = cv.textWidth(rt, 22, LITB) + 76, rx = x0 + 170 + cw + 24, rf = focusKey === 'ov:repeat';
+                cv.roundRect(rx, top, rw, 40, 20, rf ? '#3ea6ff' : rp ? C.red : C.ph);
+                repeatGlyph(cv, rx + 26, top + 20, '#ffffff', 0.6);
+                cv.text(rt, rx + 46, top + 28, 22, '#ffffff', LITB);
+                tg(rx - 10, top - 16, rw + 20, 72, run(toggleRepeat), 'ov:repeat', 30);
+            }
             cv.text(translate('Video returns when parked'), SW - 60, top + 28, 22, '#717171', { literal: true, align: 'right' });
             // laid out from the bottom: the notice / up-next row, the controls, the bar; the artwork takes what is left
             const cy = SH - 178, by = cy - 128, ay = top + 72, ah = Math.max(120, by - 56 - ay), aw = Math.round(ah * 16 / 9), ax = x0;
@@ -1529,6 +1557,12 @@ mgu.run({
                 const kx = LX + 150;
                 ctl('ov:close', kx, cy, 42, closeVideo, (c) => xGlyph(cv, kx, cy, 15, c));
                 cv.text(translate('Close'), kx, cy + 76, 22, '#dddddd', { literal: true, align: 'center' });
+            }
+            // beside it, Repeat (pink while on): the video plays again from the start when it ends
+            if (model.id && live && canRepeat()) {
+                const rx = LX + 330, on = repeatOn();
+                ctl('ov:repeat', rx, cy, 42, toggleRepeat, (c) => repeatGlyph(cv, rx, cy, on && c === '#ffffff' ? C.red : c));
+                cv.text(translate(on ? 'Repeat on' : 'Repeat'), rx, cy + 76, 22, on ? C.red : '#dddddd', { literal: true, align: 'center' });
             }
             // middle: -10 s, play / pause, +10 s (held: previous / next); preparing: the ring with the percentage
             let mid = null;

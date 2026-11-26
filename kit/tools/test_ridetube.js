@@ -438,6 +438,10 @@ async function appFrames() {
     await until(() => d.cmds('auth_status').length, 3000, 'app connects and asks for the account');
     await until(() => d.cmds('hello').length, 3000, 'hello on connect');
     assert.deepStrictEqual(d.cmds('hello')[0], { cmd: 'hello', app: require('../../apps/jap_ridetube/app.json').version, lang: 'en', region: 'GB' }, 'hello: the app version, the car\'s en_GB as YouTube language and country');
+    // a service that loops (0.5.5): Repeat shows; the app says its setting (off) at once
+    d.send({ ev: 'hello', service: '0.5.5', caps: ['loop'] });
+    await until(() => d.cmds('loop').length, 2000, 'loop said on hello');
+    assert.deepStrictEqual(d.cmds('loop'), [{ cmd: 'loop', on: false }], 'Repeat off by default');
     const POOL = (id) => id >= 8 && id < 64;
     const frame = () => scan(fs.readFileSync(file));
     // first screen: Home, signed out, nothing watched or downloaded yet: the sign-in card, no tiles
@@ -489,7 +493,11 @@ async function appFrames() {
         assert.deepStrictEqual(bar(), [], 'no bar where the kit runs the screen');
         assert.ok(pl.extra > 0, 'so the page reaches the screen bottom: extra ' + pl.extra);
         assert.deepStrictEqual(frame().vrect, [0, 0, pl.w, pl.h], 'the player: the video over the whole screen at once');
-        assert.deepStrictEqual(keys(), ['ov:back', 'ov:qr', 'ov:close', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'], 'the overlay controls');
+        assert.deepStrictEqual(keys(), ['ov:back', 'ov:qr', 'ov:close', 'ov:repeat', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'], 'the overlay controls');
+        {   // Repeat sits between Close and -10 s, apart from both
+            const r = (k) => disp.pageTargets.find((t) => t.key === k), apart = (a, b) => a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+            assert.ok(apart(r('ov:repeat'), r('ov:close')) && apart(r('ov:repeat'), r('ov:rw')), 'Repeat clear of Close and -10 s');
+        }
         // Quality: auto -> 720 (the setting too); zoom: whole picture (default, 0.3.6) -> fill
         disp.pageTargets.find((t) => t.key === 'ov:q').run();
         await lastIs(d, { cmd: 'quality', quality: '720' }, 'Quality: the next one');
@@ -594,7 +602,7 @@ async function appFrames() {
         disp.onTap(800, 300);
         await hu.loopFn();
         const hid = disp.pageTargets;
-        assert.ok(hid.length === 9 && hid.every((t) => t.w > 1000 && t.h > 500), 'a tap beside them: hidden, each key the whole screen');
+        assert.ok(hid.length === 10 && hid.every((t) => t.w > 1000 && t.h > 500), 'a tap beside them: hidden, each key the whole screen');
         assert.deepStrictEqual(frame().vrect, [0, 0, pl.w, pl.h], 'the video stays whole');
         const pauses = d.cmds('pause').length;
         hid.find((t) => t.key === 'ov:play').run();       // (as the controller pressed on its key, or a tap)
@@ -643,6 +651,7 @@ async function appFrames() {
         assert.ok(!frame().vrect, 'setting off: no video while driving again');
         console.log('ok   Video while driving setting keeps the picture while moving');
         ['ov:rw', 'ov:play', 'ov:ff', 'ov:close'].forEach((k) => assert.ok(disp.pageTargets.some((t) => t.key === k && t.w > 120 && t.w < 300), 'podcast control ' + k + ': ' + keys()));
+        assert.ok(disp.pageTargets.some((t) => t.key === 'ov:repeat'), 'podcast: Repeat in the header: ' + keys());
         disp.pageTargets.find((t) => t.key === 'ov:ff').run();
         await until(() => d.cmds('seek').length > seeks, 2000, 'a podcast +10 s');
         assert.ok(disp.pageTargets.some((t) => t.key === 'ov:bar' && t.turn), 'podcast: the knob seeks on the bar');
@@ -926,6 +935,39 @@ async function appFrames() {
         for (let k = 0; k < 40 && !d.cmds('play').some((x) => x.id === 'ZYXWVUTSRQP'); k++) { await sleep(200); await hu.loopFn(); }
         assert.ok(d.cmds('play').some((x) => x.id === 'ZYXWVUTSRQP'), 'the next one in the row plays');
         console.log('ok   autoplay: the next video in the row, 5 s after the end');
+
+        // Repeat (service 0.5.5, cap loop): the overlay's toggle and the menu's tell the service `loop` (it loops the video
+        // itself: no ended, nothing fetched again), said again on each hello; its time back at 0 is no autoplay; an older
+        // service: no Repeat
+        const lastLoop = () => d.cmds('loop').slice(-1)[0];
+        d.send({ ev: 'state', state: 'playing', id: 'ZYXWVUTSRQP' }); d.send({ ev: 'time', elapsed: 150000, total: 200000 });
+        await sleep(100); disp.onPageFocus('ov:play'); await hu.loopFn();
+        let r0 = d.cmds('loop').length;
+        disp.pageTargets.find((t) => t.key === 'ov:repeat').run();
+        assert.strictEqual(hu.ctx.settings.get('repeat'), true, 'Repeat on');
+        await until(() => d.cmds('loop').length > r0, 2000, 'loop on sent');
+        assert.deepStrictEqual(lastLoop(), { cmd: 'loop', on: true });
+        hu.handlers.BTN_REPEAT();
+        await until(() => lastLoop().on === false, 2000, 'the menu\'s Repeat: loop off');
+        assert.strictEqual(hu.ctx.settings.get('repeat'), false);
+        hu.handlers.BTN_REPEAT();
+        await until(() => lastLoop().on === true, 2000, 'on again');
+        r0 = d.cmds('loop').length;
+        d.send({ ev: 'hello', service: '0.5.5', caps: ['loop'] });          // the service again (a reconnect)
+        await until(() => d.cmds('loop').length > r0, 2000, 'loop said again on hello');
+        assert.deepStrictEqual(lastLoop(), { cmd: 'loop', on: true });
+        const p0 = d.cmds('play').length;
+        d.send({ ev: 'time', elapsed: 0, total: 200000 });                   // the service looped it: playing at 0 again
+        await sleep(300); await hu.loopFn();
+        assert.strictEqual(d.cmds('play').length, p0, 'a loop is no play of the app\'s (no autoplay)');
+        assert.ok(at(/^ov:play$/) && at(/^ov:repeat$/), 'still the player, Repeat lit: ' + disp.pageTargets.map((x) => x.key));
+        d.send({ ev: 'hello', service: '0.5.4', caps: [] });                 // an older service: no Repeat
+        await sleep(100); disp.onPageFocus('ov:play'); await hu.loopFn();
+        assert.ok(!at(/^ov:repeat$/), 'no Repeat without the loop cap: ' + disp.pageTargets.map((x) => x.key));
+        d.send({ ev: 'hello', service: '0.5.5', caps: ['loop'] });
+        hu.handlers.BTN_REPEAT();
+        await until(() => lastLoop().on === false, 2000, 'off for what follows');
+        console.log('ok   Repeat (overlay, menu): loop sent to the service, again on each hello; its loop is no autoplay; hidden for an older service');
 
         // Playlists: a playlist plays on past its grid's row of four; members-only videos left out (the setting's default)
         hu.handlers.BTN_PL();
@@ -1980,6 +2022,7 @@ async function offlineFrames(x) {
 
 async function wp12Frames(x) {
     const { hu, d, disp, speed, car } = x;
+    d.send({ ev: 'hello', service: '0.5.5', caps: ['health', 'related', 'hist', 'remote', 'loop'] });   // (wp9Frames' caps) and loop: the knob reaches Repeat
     let K = 5000;
     const ccu = (o) => disp._ccu(Object.assign({ frontRotaryEncoderOperation: K, frontRotaryEncoderPushButton: 0, frontRotaryEncoderDeflection: 0 }, o));
     const settle = async () => { await hu.loopFn(); await sleep(5); await hu.loopFn(); };
@@ -2109,12 +2152,12 @@ async function wp12Frames(x) {
     d.send({ ev: 'state', state: 'playing', id: vid('HOMEB', 2), title: 'HOMEB 2' }); d.send({ ev: 'time', elapsed: 1000, total: 60000 });
     await sleep(300); await settle(); await sleep(10); await settle();
     kept('tile to the player');
-    const pl = await sweep('player', ['ov:back', 'ov:close', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar']);
+    const pl = await sweep('player', ['ov:back', 'ov:close', 'ov:repeat', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar']);
     assert.ok(pl.size >= 8, 'the overlay');
     // driving: podcast mode, its big controls and the bar (the knob seeks there: so it comes last)
     speed(50 * 64); await sleep(300); await settle(); await sleep(10); await settle();
     kept('player to podcast mode');
-    await sweep('podcast mode', ['ov:rw', 'ov:play', 'ov:ff', 'ov:close', 'ov:bar']);
+    await sweep('podcast mode', ['ov:repeat', 'ov:rw', 'ov:play', 'ov:ff', 'ov:close', 'ov:bar']);
     speed(0); await sleep(300); await settle();
     await tilt('W');
     assert.ok(here().endsWith(':' + vid('HOMEB', 2)), 'pushed left: back on the tile: ' + here());
