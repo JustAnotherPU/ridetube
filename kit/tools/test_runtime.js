@@ -369,6 +369,10 @@ test('ru plurals: one, few, many (11-14 many), the catalog\'s three forms; Engli
         assert.ok(i18n.setLanguage('zh-CN'));
         assert.deepStrictEqual([1, 5].map((n) => i18n.plural(n, '{count} channel', '{count} channels')), ['{count} 个频道', '{count} 个频道'], 'zh-CN: its one form for every count');
         assert.strictEqual(i18n.t('Home'), '首页');
+        assert.ok(i18n.setLanguage('ko'));
+        assert.deepStrictEqual([1, 5].map((n) => i18n.plural(n, '{count} channel', '{count} channels')), ['채널 {count}개', '채널 {count}개'], 'ko: its one form for every count');
+        assert.strictEqual(i18n.t('Home'), '홈');
+        assert.ok(i18n.setLanguage('zh-CN'));
         assert.strictEqual(i18n.setLanguage('xx'), false, 'an unknown language: nothing changes');
         assert.strictEqual(i18n.getLanguage(), 'zh-CN');
     } finally { i18n.setLanguage('en'); }
@@ -403,7 +407,7 @@ test('ru.json: every character draws from the Cyrillic atlases (label, bold, lig
 
 // the Latin catalogs (fr, nl, de, es, it, pt): complete like ru.json, the same {placeholders}, two plural forms, every
 // letter in the atlases an English package draws with
-const LATIN = fs.readdirSync(path.join(__dirname, '..', 'runtime', 'locales')).map((f) => f.replace(/\.json$/, '')).filter((t) => /^[a-z]{2}$/.test(t) && t !== 'ru');
+const LATIN = fs.readdirSync(path.join(__dirname, '..', 'runtime', 'locales')).map((f) => f.replace(/\.json$/, '')).filter((t) => /^[a-z]{2}$/.test(t) && t !== 'ru' && t !== 'ko');
 test('every catalog is offered in the Language setting', () => {
     const spec = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'apps', 'jap_ridetube', 'app.json'), 'utf8'));
     const offered = spec.settings.find((s) => s.key === 'language').options.map((o) => o[0]);
@@ -429,6 +433,51 @@ LATIN.forEach((tag) => test(tag + '.json: complete, the same placeholders, two p
         assert.deepStrictEqual(lost, [], fam + ' ' + size + ': no glyph for ' + lost.join(' '));
     });
 }));
+
+// ko.json: complete like the others, one form for every count (as zh-CN), and every character in the Korean atlas
+// (kit/localization/fonts/korean.json: Noto Sans CJK KR, the 2,350 KS X 1001 syllables), which fonts.get picks for Hangul
+const KO = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'runtime', 'locales', 'ko.json'), 'utf8'));
+test('ko.json: complete, the same placeholders, one plural form, Korean', () => {
+    const gone = Object.keys(KO).filter((k) => k.split('|').some((part) => RT_SOURCES.indexOf(part) < 0));
+    assert.deepStrictEqual(gone, [], 'keys no source has');
+    const missing = rideTubeStrings().filter((x) => !BRAND.test(x) && !Object.prototype.hasOwnProperty.call(KO, x));
+    assert.deepStrictEqual(missing, [], 'strings without a Korean row');
+    const ph = (x) => (x.match(/\{\w+\}/g) || []).sort().join();
+    Object.keys(KO).forEach((k) => {
+        assert.ok(typeof KO[k] === 'string' && KO[k].trim(), 'a value: ' + k);
+        assert.ok(KO[k].indexOf('|') < 0, 'one form: ' + k);
+        assert.strictEqual(ph(KO[k]), ph(k.split('|')[0]), 'the same {placeholders}: ' + k);
+    });
+    assert.ok(Object.keys(KO).filter((k) => /[\uac00-\ud7a3]/.test(KO[k])).length > Object.keys(KO).length * 0.9, 'mostly Korean');
+});
+test('ko.json: every character is in the Korean atlas a build ships, which fonts.get picks for Hangul', () => {
+    const atlas = require('../localization/fonts/korean.json');
+    const sizes = atlas.sizes.filter((x) => x.atlasH <= 4096);
+    assert.ok(sizes.length, 'a size mgu-render accepts');
+    const text = Object.values(KO).join('') + '한국어' + '뉴진스 하입보이 뮤직비디오';   // a Korean title draws too
+    sizes.forEach((x) => {
+        const lost = Array.from(new Set(Array.from(text))).filter((ch) => ch.trim() && !x.glyphs[ch.codePointAt(0)]);
+        assert.deepStrictEqual(lost, [], x.size + ' px: no glyph for ' + lost.join(' '));
+    });
+    // laid out as a build ships it (kit/fonts/korean.json next to cjk.json, build.py): Hangul text picks it, Chinese
+    // and Latin keep theirs
+    const os = require('os'), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt-ko-'));
+    fs.copyFileSync(path.join(__dirname, '..', 'runtime', 'fonts.js'), path.join(dir, 'fonts.js'));
+    fs.mkdirSync(path.join(dir, 'fonts'));
+    const runtimeFonts = path.join(__dirname, '..', 'runtime', 'fonts');
+    fs.readdirSync(runtimeFonts).filter((f) => f.endsWith('.json')).forEach((f) => fs.copyFileSync(path.join(runtimeFonts, f), path.join(dir, 'fonts', f)));
+    fs.copyFileSync(path.join(__dirname, '..', 'localization', 'fonts', 'korean.json'), path.join(dir, 'fonts', 'korean.json'));
+    try {
+        const fonts = require(path.join(dir, 'fonts.js'));
+        [['label', 18], ['label', 24], ['bold', 32], ['light', 32], ['num', 40]].forEach(([fam, size]) => {
+            const f = fonts.get(fam, size, '홈');
+            assert.strictEqual(f.family, 'korean', fam + ' ' + size);
+            assert.ok(Array.from('홈 구독 나중에 볼 동영상').every((ch) => fonts.glyph(f, ch)), fam + ' ' + size);
+        });
+        assert.strictEqual(fonts.get('label', 24, '首页').family, 'cjk');
+        assert.strictEqual(fonts.get('label', 24, 'Home').family, 'label');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('the built package (dist/jap_ridetube): the car\'s ru_RU table has the menu and settings in Russian, en_GB as before', () => {
     const dir = path.join(__dirname, '..', '..', 'dist', 'jap_ridetube', 'rhmiData', 'strings');

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Korean: the menus, the settings, the car's own menu for RideTube on a Korean head unit and the phone remote page
+  come in Korean (Language setting: 한국어; Auto picks it when iDrive is set to Korean). Korean text, video titles
+  included, draws from a new Hangul atlas (`kit/localization/fonts/korean.json`, Noto Sans CJK KR, the 2,350 KS X
+  1001 syllables), which `kit/tools/bake_korean.py` rebakes.
+
 ## App 0.6.4 and service 0.5.4
 
 Resuming a video now picks up where you last stopped, even if that was on another device.

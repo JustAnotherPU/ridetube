@@ -56,7 +56,7 @@ const TOKEN_RE = /^Bearer ([0-9a-f]{32})$/;
 const IFACE_RE = /^[A-Za-z0-9_.-]{1,15}$/;
 const Q_MAX = 200, TEXT_MAX = 2048, BODY_MAX = 16 * 1024, LINE_MAX = 4096, FAIL_MAX = 10;
 const ASK_MS = 5000;
-const LANGS = ['en', 'fr', 'nl', 'de', 'es', 'it', 'pt', 'ru', 'zh-CN'];   // RideTube's languages (the app's catalogs)
+const LANGS = ['en', 'fr', 'nl', 'de', 'es', 'it', 'pt', 'ru', 'zh-CN', 'ko'];   // RideTube's languages (the app's catalogs)
 // the hosts a pasted link may name, and the paths that carry a video id
 const HOSTS = ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtube-nocookie.com', 'youtube-nocookie.com'];
 const ID_PATHS = ['shorts', 'live', 'embed', 'v'];

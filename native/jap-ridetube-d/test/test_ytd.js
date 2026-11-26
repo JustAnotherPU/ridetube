@@ -3999,7 +3999,7 @@ async function main() {
                 assert.ok(strings[l]['Type a search (at most 200 characters)'].indexOf('200') >= 0, l + ': the number kept');
             });
             const hashOf = (page) => require('crypto').createHash('sha256').update(/<script>([\s\S]*?)<\/script>/.exec(page)[1]).digest('base64');
-            for (const [lang, served, word] of [['fr', 'fr', 'Envoyer à la voiture'], ['zh-CN', 'zh-CN', '发送到汽车'], ['xx"><script>', 'en', null], [undefined, 'en', null]]) {
+            for (const [lang, served, word] of [['fr', 'fr', 'Envoyer à la voiture'], ['zh-CN', 'zh-CN', '发送到汽车'], ['ko', 'ko', '차로 보내기'], ['xx"><script>', 'en', null], [undefined, 'en', null]]) {
                 await turnOff();
                 token = await turnOn(lang);
                 const page = await req('GET', '/');
