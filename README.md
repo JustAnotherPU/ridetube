@@ -6,6 +6,8 @@ RideTube shows in English, French, Dutch, German, Spanish, Italian, Portuguese, 
 (Language setting). Chinese translation by 小白151
 (JackieZ123430). The [Chinese guide](README.zh-CN.md) includes setup, playback settings, and font coverage.
 
+Write-up: [RideTube on Everything Patched](https://everythingpatched.com/posts/ridetube/).
+
 > **Experimental and unofficial.** RideTube is an unofficial client for YouTube. It is not affiliated with,
 > endorsed by or sponsored by Google or YouTube. Use it at your own risk. You are responsible for following
 > YouTube's Terms of Service and the laws of your country, and for using it safely: by default the picture
