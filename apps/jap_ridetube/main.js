@@ -336,7 +336,11 @@ mgu.run({
             nextAt = 0;
             if (model.id === id && model.active()) return;
             playRect = rect();
-            model.play(id, playRect, settings.get('fill') !== false, it, { quality: settings.get('quality'), skip: sbSkip(), noUpscale: true });
+            model.play(id, playRect, settings.get('fill') !== false, it, { quality: settings.get('quality'), skip: sbSkip(), noUpscale: true, next: upcoming() });
+        }
+        // what plays next, for the cluster's and head-up display's list (the service lists them after the one playing)
+        function upcoming() {
+            return queue.slice(0, 5).map((r) => ({ id: r.id, title: String(r.title || ''), channel: String(r.channel || '') }));
         }
         // the one playing, as a list item (what Previous and Next step over)
         const current = () => model.item(model.id) || { id: model.id, title: model.title, channel: model.channel };
