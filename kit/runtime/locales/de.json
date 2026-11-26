@@ -248,5 +248,9 @@
   "Signed out, Home shows Continue watching and your downloads": "Abgemeldet zeigt die Startseite Weiterschauen und deine Downloads",
   "Settings can download your newest Subscriptions videos, on Wi-Fi only": "Die Einstellungen können die neuesten Abo-Videos laden, nur im WLAN",
   "More videos play: VP9 is used when YouTube offers it": "Mehr Videos laufen: VP9 wird genutzt, wenn YouTube es anbietet",
-  "Pausing in the first minute now stops the sound too": "Pause in der ersten Minute stoppt jetzt auch den Ton"
+  "Pausing in the first minute now stops the sound too": "Pause in der ersten Minute stoppt jetzt auch den Ton",
+  "Repeat": "Wiederholen",
+  "Repeat on": "Wiederholen an",
+  "Repeat off": "Wiederholen aus",
+  "Repeat: play the video again when it ends": "Wiederholen: das Video am Ende erneut abspielen"
 }
