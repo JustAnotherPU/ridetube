@@ -194,7 +194,7 @@ request and I will help.
 Thanks to everyone whose code is in RideTube:
 
 - @cars-done: your playlists on the rail, Cyrillic text, touch seeking, the video's title and picture on the
-  cluster and the media screen, and the steering wheel's next and previous buttons.
+  cluster and the media screen, the steering wheel's next and previous buttons, and Repeat.
 - @alexarghir98: Romanian ș ț, and accented letters the fonts lack drawn as their base letter.
 - @marilykinson-glitch: the History and Liked feeds, related videos, the Shorts handling, the dropout recovery
   and the command-sequence tests, from their fork.
@@ -203,6 +203,7 @@ Thanks to everyone whose code is in RideTube:
 - @istt1899: the HTTP and SOCKS5 tunnels used for the MGU Store's proxy, from their fork.
 - @7amoody1985: streaming the playing video in a window that follows playback, and seeks and resumes that start
   where you are, from #20.
+- @jaimeen77-cmyk: the Korean translation and the Hangul font.
 
 ## License
 
