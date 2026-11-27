@@ -38,6 +38,7 @@ const calls = [];
 let conns = [{ mainConnectionID: 7, sourceID: 1046, sinkID: 1024 }, { mainConnectionID: 15, sourceID: 129, sinkID: 387 }];
 let nextConn = 20;
 let slowPlayFile = 0;
+let hudAnswer = null;   // createPlaylist: null answers OK; 'throw' throws; else that EntError
 const subs = {};
 const someip = {
     buildProxy: async (cfg, inst) => ({
@@ -50,6 +51,8 @@ const someip = {
             if (m === 'connect') { const id = nextConn++; conns.push({ mainConnectionID: id, sourceID: a.sourceID }); return { mainConnectionID: id, amError: 'E_OK' }; }
             if (m === 'disconnect') { conns = conns.filter((c) => c.mainConnectionID !== a.mainConnectionID); return { amError: 'E_OK' }; }
             if (m === 'playFile' && slowPlayFile) await sleep(slowPlayFile);
+            if (m === 'createPlaylist' && hudAnswer === 'throw') throw new Error('no such method');
+            if (m === 'createPlaylist' && hudAnswer) return { EntError: hudAnswer };
             return { EntError: 'OK' };
         }
     })
@@ -208,6 +211,57 @@ async function main() {
         assert.strictEqual(fs.statSync(path.join(cache, 'DemoVideo01')).mode & 0o777, 0o711, 'an old 0700 folder opened up');
         await waitUntil(() => ytdecLines().length > 0);
         assert.ok(ytdecLines()[0].endsWith('argv --dir ' + path.join(cache, 'DemoVideo01') + ' --rect 1836x504 --fill --log ' + path.join(tmp, 'ytdec.log')), ytdecLines()[0]);
+    });
+
+    await t('cluster list: this video then play\'s next, given just before playFile; ids checked, at most 5; the list mode once', async () => {
+        c.clear(); calls.length = 0; setMode('ok');
+        const ok = (n) => ({ id: 'NextVideo0' + n, title: 'N' + n, channel: 'K' + n });
+        c.send({ cmd: 'play', id: 'DemoVideo01', rect: '1836x504', fill: true,
+            next: [{ id: 'NextVideo01', title: 'Two\nlines\u0007', channel: 7 }, { id: 'bad id' }, 'NextVideo09', { id: ['NextVideo08'] }, null, ok(2), ok(3), ok(4), ok(5), ok(6)] });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+        const order = calls.filter((x) => ['createPlaylist', 'playFile'].indexOf(x.m) >= 0).map((x) => x.m);
+        assert.deepStrictEqual(order, ['createPlaylist', 'playFile'], 'the list goes in before the file');
+        const cp = called('createPlaylist')[0];
+        assert.strictEqual(cp.inst, 'OapGenericMedia');
+        const text = (it, k) => it.metadata.find((m) => m.key === k).value.stringValue;
+        const l = cp.a.newPlaylist;
+        assert.deepStrictEqual(l.map((it) => [it.pos, it.id.toString('ascii'), text(it, 'TITLE'), text(it, 'ARTIST')]), [
+            [0, 'DemoVideo01', 'T DemoVideo01', 'C'],
+            [1, 'NextVideo01', 'Two lines', '7'],
+            [2, 'NextVideo02', 'N2', 'K2'], [3, 'NextVideo03', 'N3', 'K3'], [4, 'NextVideo04', 'N4', 'K4'], [5, 'NextVideo05', 'N5', 'K5']]);
+        const modes = called('setCombiListMode').length;
+        assert.ok(modes <= 1, 'the mode at most once for this player');
+        calls.length = 0;
+        c.send({ cmd: 'play', id: 'DemoVideo01', rect: '1836x504', fill: true });   // no next: this video alone
+        await waitUntil(() => called('playFile').length > 0);
+        assert.deepStrictEqual(called('createPlaylist')[0].a.newPlaylist.map((it) => it.id.toString('ascii')), ['DemoVideo01']);
+        assert.strictEqual(called('setCombiListMode').length, 0, 'not again');
+        assert.strictEqual(d.audio.hudMode, d.audio.mp);
+    });
+
+    await t('cluster list: a player that refuses it or lacks it: logged once, playback goes on, not asked again', async () => {
+        for (const answer of ['NOT_SUPPORTED', 'throw']) {
+            c.clear(); calls.length = 0; setMode('ok'); d.hudOff = false; hudAnswer = answer;
+            const n = logs.length;
+            c.send({ cmd: 'play', id: 'DemoVideo01', rect: '1836x504', fill: true, next: [{ id: 'NextVideo01', title: 'N1' }] });
+            await c.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+            assert.strictEqual(called('playFile').length, 1, answer + ': played all the same');
+            assert.ok(logs.slice(n).some((l) => /cluster list: off \(.*(NOT_SUPPORTED|no such method)\)/.test(l)), answer + ': ' + logs.slice(n).join(' | '));
+            assert.strictEqual(d.hudOff, true);
+            calls.length = 0;
+            c.send({ cmd: 'play', id: 'DemoVideo01', rect: '1836x504', fill: true });
+            await waitUntil(() => called('playFile').length > 0);
+            assert.strictEqual(called('createPlaylist').length, 0, answer + ': not asked again');
+        }
+        hudAnswer = null; d.hudOff = false;
+    });
+
+    await t('the source\'s name is the car\'s ("Online source"): setDeviceInfoName is never sent (the car kept the name empty)', async () => {
+        c.clear(); calls.length = 0; setMode('ok');
+        c.send({ cmd: 'play', id: 'DemoVideo01', rect: '1836x504', fill: true });
+        await c.waitFor((x) => x.ev === 'state' && x.state === 'playing');
+        assert.strictEqual(called('setDeviceInfoName').length, 0);
+        assert.deepStrictEqual(calls.filter((x) => ['createPlaylist', 'playFile'].indexOf(x.m) >= 0).map((x) => x.m), ['createPlaylist', 'playFile']);
     });
 
     await t('the player\'s own metadata (newer firmware): logged, keys as names or numbers; none of them said so', async () => {
@@ -3212,7 +3266,7 @@ async function main() {
         await sleep(20);
         assert.strictEqual(called('connect').length, 0, 'not before the wait');
         await recovered(1);
-        assert.deepStrictEqual(calls.map((x) => x.m).filter((m) => m !== 'sendButtonEvent'), ['disconnect', 'connect', 'playFile', 'setTime']);
+        assert.deepStrictEqual(calls.map((x) => x.m).filter((m) => m !== 'sendButtonEvent'), ['disconnect', 'connect', 'createPlaylist', 'playFile', 'setTime']);
         assert.deepStrictEqual(called('setTime')[0].a, { newTimeElapsed: 5000 });
         assert.ok(!c.evs.some((x) => x.ev === 'error' || x.ev === 'state'), 'no error, no state change: ' + JSON.stringify(c.evs));
         assert.strictEqual(ours().length, 1);
@@ -3331,7 +3385,7 @@ async function main() {
         await sleep(20);
         assert.strictEqual(called('connect').length, 0, 'not before the wait');
         await waitUntil(() => called('playFile').length === 1);
-        assert.deepStrictEqual(calls.map((x) => x.m).filter((m) => m !== 'sendButtonEvent'), ['disconnect', 'connect', 'playFile']);
+        assert.deepStrictEqual(calls.map((x) => x.m).filter((m) => m !== 'sendButtonEvent'), ['disconnect', 'connect', 'createPlaylist', 'playFile']);
         assert.strictEqual(path.basename(called('playFile')[0].a.path), 'audio.m4a');
         assert.ok(!c.evs.some((x) => x.ev === 'error'), JSON.stringify(c.evs));
         assert.strictEqual(ours().length, 1);

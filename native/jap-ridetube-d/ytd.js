@@ -211,6 +211,13 @@ function readMeta(dir, id) {
         return { id: id, title: m.title || id, channel: m.channel || '', duration_s: m.duration_s || null };
     } catch (e) { return { id: id, title: id, channel: '', duration_s: null }; }
 }
+// play's `next` from the app -> [{id, title, channel}]: video ids only, at most HUD_NEXT, the texts one line of 200 at most
+const HUD_NEXT = 5;
+const hudText = (s) => String(s === undefined || s === null ? '' : s).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 200);
+function hudNext(next) {
+    return (Array.isArray(next) ? next : []).filter((x) => x && typeof x === 'object' && isVid(x.id)).slice(0, HUD_NEXT)
+        .map((x) => ({ id: x.id, title: hudText(x.title) || x.id, channel: hudText(x.channel) }));
+}
 // enough to start without a fetch. No video.h264.part: play() stops any fetcher first, so a .part is a
 // dead fetch's leftover that would never complete (fetched again instead)
 function isPlayable(dir) {
@@ -1247,13 +1254,19 @@ Audio.prototype.playNow = async function (file) {
     if (!r || (r.amError !== 'E_OK' && r.amError !== 'E_ALREADY_EXISTS')) throw new Error('audio connect: ' + (r && r.amError));
     this.connId = r.mainConnectionID;
     if (this.connId === undefined || this.connId === null) this.connId = -1; // id unknown: release sweeps by source
+    await this.beforePlayFile();
     const p = await this.mp.callMethod('playFile', { path: file, languageCode: 7695972 }, 5000);
     this.opts.log('playFile ' + JSON.stringify(p));
     if (!p || p.EntError !== 'OK') throw new Error('playFile: ' + (p && p.EntError));
 };
+// the daemon's hook run just before each playFile (the cluster's list, Daemon.hudList); never fails a play
+Audio.prototype.beforePlayFile = function () {
+    if (typeof this.preList !== 'function') return Promise.resolve();
+    return Promise.resolve().then(() => this.preList()).catch((e) => this.opts.log('before playFile: ' + (e && e.message || e)));
+};
 // playFile again on the live connection: after a STOP the player needs the file, not PLAY
 Audio.prototype.replay = function (file) {
-    const p = this.mp.callMethod('playFile', { path: file, languageCode: 7695972 }, 5000).then((r) => {
+    const p = this.beforePlayFile().then(() => this.mp.callMethod('playFile', { path: file, languageCode: 7695972 }, 5000)).then((r) => {
         this.opts.log('replay ' + JSON.stringify(r));
         if (!r || r.EntError !== 'OK') throw new Error('playFile: ' + (r && r.EntError));
     });
@@ -1416,6 +1429,8 @@ function Daemon(o) {
         state: (v) => this.onPlayerState(v),
         error: (v) => this.onPlaybackError(v)
     });
+    this.audio.preList = () => this.hudList();
+    this.hudOff = false;   // the player refused the list once (older firmware): not asked again until a restart
     this.childFetch = !this.opts.ytRequest;
     if (this.childFetch) this.opts.ytRequest = (m, u, h, b, t) => this.fetch({ method: m, url: u, headers: h, body: b, timeoutMs: t });
     this.fetchUid = null;
@@ -2022,7 +2037,7 @@ Daemon.prototype.onLine = function (line) {
     case 'ytdlp': return typeof m.auto === 'boolean' ? this.setYtdlpAuto(m.auto) : this.sendYtdlp();
     case 'search': return this.search(m.q);
     case 'thumb': return this.thumb(m.id);
-    case 'play': return this.play(m.id, m.rect, !!m.fill, m.at, m.quality, m.skip, undefined, m.noUpscale === true);
+    case 'play': return this.play(m.id, m.rect, !!m.fill, m.at, m.quality, m.skip, undefined, m.noUpscale === true, m.next);
     case 'pause': return this.pause();
     case 'resume': return this.resume();
     case 'seek': return this.seek(m.ms);
@@ -2565,9 +2580,11 @@ Daemon.prototype.pruneThumbs = function (tdir) {
 // restore: {ms, paused, fill, height}, a quality restart of the same video: back to ms (even under 10 s), paused if it was.
 // noUpscale: the app (0.6.6+) draws the picture into the rect itself, so ytdec may send it at the video's own size
 // (--no-upscale); an older app gets the rect-sized frame with its bars as before.
+// next: [{id, title, channel}] the app's upcoming videos (the rest of its row, shelf or playlist), for the cluster's and
+// head-up display's list (hudList); at most HUD_NEXT, kept over quality restarts.
 // Every play keeps its start in this.restart until its first tick puts it there; a pause, resume, seek (or fill) sent
 // meanwhile changes it (the last word counts), a stop or another play replaces it.
-Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, restore, noUpscale) {
+Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, restore, noUpscale, next) {
     if (!isVid(id)) return this.emit({ ev: 'error', msg: 'bad id' });
     if (!/^\d{2,4}x\d{2,4}$/.test(String(rect))) rect = '1280x720';
     const own = restore || { ms: 0, paused: false, height: qualityHeight(quality, readJson(this.opts.leaseFile)) };
@@ -2589,7 +2606,7 @@ Daemon.prototype.play = async function (id, rect, fill, at, quality, skip, resto
     let chapters;
     try { chapters = mb ? JSON.parse(mb.toString('utf8')).chapters : undefined; } catch (e) { /* none */ }
     this.cur = { id: id, title: meta0.title, durationMs: meta0.duration_s > 0 ? meta0.duration_s * 1000 : undefined, dir: dir, rect: rect, fill: fill, noUpscale: !!noUpscale, gen: gen, height: qualityHeight(quality, readJson(this.opts.leaseFile)),
-        skip: Array.isArray(skip) ? skip.filter((x) => typeof x === 'string') : null, chapters: chapters };
+        skip: Array.isArray(skip) ? skip.filter((x) => typeof x === 'string') : null, chapters: chapters, next: hudNext(next) };
     const was = this.positions()[id];
     // the furthest of where it was left here and YouTube's own position (at: another device's): seek there on the first tick
     if (!restore && !own.sought) own.ms = !this.opts.resume ? 0 : Math.max(was && !was.done && was.ms > 10000 ? was.ms : 0, Number(at) > 10000 ? Math.floor(Number(at)) : 0);
@@ -3224,7 +3241,7 @@ Daemon.prototype.refetch = async function (quality, h) {
     await this.stop(null);
     if (this.restart !== restore) return undefined;   // stopped, replaced or asked again meanwhile: this one is cancelled
     this.rmTree(c.dir);
-    return this.play(c.id, c.rect, c.fill, null, quality, c.skip, restore, c.noUpscale);
+    return this.play(c.id, c.rect, c.fill, null, quality, c.skip, restore, c.noUpscale, c.next);
 };
 
 // ---- MediaPlayer events
@@ -3386,6 +3403,35 @@ Daemon.prototype.recover = async function () {
         await this.replayAt('underrun recovery');
     } finally {
         if (gen === this.gen) this.recovering = false;
+    }
+};
+
+// ---- the cluster's and head-up display's list
+// What the instrument cluster and the head-up display list for the media source (else "No entries"): the video playing,
+// then the app's upcoming ones (play's `next`). Given to the player just BEFORE each playFile (Audio.beforePlayFile):
+// createPlaylist while it plays stops the sound (seen on the car). The combined-list mode is set once per player proxy.
+// A player without createPlaylist (the built-in description, older firmware) or that refuses it: logged once, the list
+// is not asked again until the service restarts, and playback goes on as before.
+// The head-up display's top line, "Online source", is the car's own label for this player slot: setDeviceInfoName was
+// answered OK but left deviceInfo's name empty (type INT_MASS_STORAGE, set by the player), so RideTube does not set it.
+Daemon.prototype.hudList = async function () {
+    const mp = this.audio.mp, c = this.cur;
+    if (!mp || !c || this.hudOff) return;
+    const meta = readMeta(c.dir, c.id);
+    const item = (pos, id, title, channel) => ({ pos: pos, id: Buffer.from(id, 'ascii'),
+        metadata: [{ key: 'TITLE', value: { stringValue: title } }, { key: 'ARTIST', value: { stringValue: channel } }] });
+    const list = [item(0, c.id, hudText(meta.title !== c.id ? meta.title : c.title || c.id) || c.id, hudText(meta.channel))]
+        .concat((c.next || []).map((x, i) => item(i + 1, x.id, x.title, x.channel)));
+    const ok = (what, r) => { if (r && r.EntError && r.EntError !== 'OK') throw new Error(what + ' ' + r.EntError); };
+    try {
+        ok('createPlaylist', await mp.callMethod('createPlaylist', { newPlaylist: list }, 3000));
+        if (this.audio.hudMode !== mp) {
+            ok('setCombiListMode', await mp.callMethod('setCombiListMode', { combiListMode: 'COMPLETE_PLAYLIST' }, 3000));
+            this.audio.hudMode = mp;
+        }
+    } catch (e) {
+        this.hudOff = true;
+        this.log('cluster list: off (' + (e && e.message || e) + ')');
     }
 };
 
